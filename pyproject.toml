@@ -1,0 +1,32 @@
+[project]
+name = "wonder-stockresearch"
+version = "0.1.0"
+description = "个人港股、美股公司研究助手"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2,<3",
+]
+
+[project.scripts]
+wonder-research = "wonder_stockresearch.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wonder_stockresearch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
