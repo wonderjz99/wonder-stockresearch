@@ -18,7 +18,7 @@
 
 ## 工程方法
 
-- 采用 Python 核心 + CLI + SQLite/文件；先由 OpenCode 使用，不先实现 MCP、SDK 或模型循环。后续明确允许增加 DeepSeek 等模型 API 写作入口；“不先实现”不是永久禁止。具体边界见技术规格第 8 节。
+- 采用 Python 核心 + CLI + SQLite/文件；先由 OpenCode 使用，不先实现 MCP、SDK 或模型循环。后续明确允许增加 DeepSeek 等模型 API 写作入口；“不先实现”不是永久禁止。具体边界见技术规格第 8 节。LangGraph 只在阶段 4–5 的真实运行证明存在动态工具选择、多轮补证据、跨天恢复或多步并行需求后，按 PLAN 的可选阶段评估；不能提前替代函数核心。
 - 普通函数、小模块、明确数据模型。使用 Pydantic 输入校验、sqlite3 直接 SQL、argparse CLI；不做 ORM、仓储接口层、依赖注入容器或插件框架。
 - 研究参数和文字通过 UTF-8 JSON 文件或 stdin 传递；禁止 shell 拼接研究正文。业务输出 JSON 到 stdout，日志到 stderr。
 - 模型产生待验证的结构化判断；程序处理数据、计算总分、验证引用并渲染报告。结构合格不等于判断已证实。

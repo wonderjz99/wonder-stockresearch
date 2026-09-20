@@ -5,7 +5,10 @@ description = "个人港股、美股公司研究助手"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "futu-api>=10.11.7108",
     "pydantic>=2,<3",
+    "pypdf>=4",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]

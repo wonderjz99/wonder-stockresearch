@@ -178,6 +178,29 @@ class Source(StrictModel):
         return self
 
 
+class SourceRequest(StrictModel):
+    """source-add 的输入：恰好一个 url 或本地 file，程序自行计算哈希与获取时间。"""
+
+    kind: Literal["primary", "provider", "secondary", "legacy"]
+    title: str = Field(min_length=1)
+    url: str | None = None
+    file: str | None = None
+    published_at: datetime | None = None
+    publication_precision: Literal["date", "datetime", "unknown"] = "unknown"
+    publication_timezone: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def exactly_one_origin(self) -> SourceRequest:
+        if bool(self.url) == bool(self.file):
+            raise ValueError("url 与 file 必须且只能提供一个")
+        if self.published_at is None and self.publication_precision != "unknown":
+            raise ValueError("published_at 为空时 publication_precision 必须是 unknown")
+        if self.published_at is not None and self.publication_precision == "unknown":
+            raise ValueError("已知 published_at 时不能使用 unknown 精度")
+        return self
+
+
 class ResearchPacket(StrictModel):
     draft: ResearchDraft
     sources: list[Source]

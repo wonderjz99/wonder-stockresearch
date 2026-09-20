@@ -1,6 +1,6 @@
 # 技术规格 v1
 
-本文件给出首版实施默认值，供新会话直接实现。边界来源于 PLAN；字段、CLI 名称、超时等为工程默认值，可因实际接口验证做不改变产品语义的小幅修正并记录。首版没有模型 API 调用或密钥存储；后续直接接模型 API 的扩展边界见第 8 节。
+本文件给出首版实施默认值，供新会话直接实现。边界来源于 PLAN；字段、CLI 名称、超时等为工程默认值，可因实际接口验证做不改变产品语义的小幅修正并记录。首版没有模型 API 调用或密钥存储；后续直接接模型 API 的扩展边界见第 8 节，编排演进边界见第 9 节。
 
 ## 1. 模块与依赖
 
@@ -8,7 +8,7 @@
 
 按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、market.py（富途）、disclosures.py（公告）、cli.py/__main__.py。不先生成空模块或多层接口。
 
-Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 为标准库。开发用 pytest、ruff；HTTP 用 requests，文字 PDF 用 pypdf；富途 SDK 在阶段 4 按真实可用版本锁定。uv.lock 随实现维护。不在文档里承诺未经验证的 SDK 版本。
+Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 为标准库。开发用 pytest、ruff；HTTP 用 requests，文字 PDF 用 pypdf。富途 SDK 阶段 4 锁定 `futu-api==10.11.7108`（实测可连接本机 OpenD 并返回快照/财务）。uv.lock 随实现维护。不在文档里承诺未经验证的 SDK 版本。
 
 项目根通过 --root 显式传入，否则用当前目录，要求根目录存在本项目 pyproject.toml 标识；不要从任意 cwd 悄悄写旧项目。import 无网络/建表副作用。
 
@@ -42,7 +42,15 @@ Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 
 - sources(id PK, ticker FK, kind, metadata_json, sha256, raw_path, text_path nullable, retrieved_at)。
 - run_sources(run_id FK, source_id FK, PRIMARY KEY(run_id,source_id))。
 
-foreign_keys=ON、busy_timeout=5000；首版使用默认 journal，不先开 WAL。PRAGMA user_version 管理 schema，初版为 1；以后只添加显式递增迁移，不每次启动重建表。
+阶段 4 已实现一张轻量运行步骤表 `run_steps`（schema v2，经 v1→v2 显式迁移加入），作为 `runs` 的执行明细，不是事件溯源或通用任务队列：
+
+- `run_steps(run_id FK, step_key, attempt, status, input_hash nullable, output_ref nullable, provider nullable, model nullable, started_at nullable, finished_at nullable, error_json nullable, PRIMARY KEY(run_id,step_key,attempt))`。
+- `status` 只允许 `pending`、`running`、`succeeded`、`failed`、`blocked`、`skipped`；`attempt` 从 1 开始递增。
+- `output_ref` 只指向已有的来源、草稿或受控 JSON 产物，不把大段原文或隐藏推理塞进步骤表。
+- 采集器和未来 writer 使用它记录可重试边界、输入哈希、provider 错误和输出引用；`runs.draft_json` 仍是草稿的正式内容。`output_ref` 形如 `source:<uuid>`。
+- 此表通过显式 schema migration（`_MIGRATIONS` v1→v2）加入，`initialize` 对已有 v1 库执行迁移，不重建已有表。
+
+foreign_keys=ON、busy_timeout=5000；首版使用默认 journal，不先开 WAL。PRAGMA user_version 管理 schema，阶段 1–3 为 1、阶段 4 为 2；只添加显式递增迁移，不每次启动重建表。
 
 答案保存在 runs.draft_json，SQL 不拆成 claim/evidence 图数据库。JSON 是 SQLite 的正式内容；导出 research.json 是同内容快照。原文文件是字节事实源。Markdown 为视图，手工修改不回写数据库。
 
@@ -64,16 +72,16 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 - watch add TICKER [--name NAME] / watch remove TICKER / watch list：只维护本地 watched，不删除历史。
 - start TICKER [--as-of ISO] [--baseline RUN_ID]：默认 as_of 为当前带时区时间；产生 draft run 与 run_id，kind 固定为 standard。baseline 必须是同 ticker 的 completed run，时间不晚于新 run。不自动选未完成草稿。本版不提供附记/专题的启动开关，只保留表的 kind/parent_run_id 字段。
 - status RUN_ID / history TICKER：返回状态、质量信息、来源摘要/历史元数据，不一次吐所有原文。
-- save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources；来源不含真实字节归档（source-add 属阶段 3），故本阶段不校验原文文件存在。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
+- save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources。阶段 5 起校验会把 packet 内来源与该 run 已挂来源合并（`_effective_sources`），因此宿主引用 collect/source-add 已归档的来源时 `sources` 可留空，不会误报 `unknown_source`；真正未归档的引用仍被拒绝。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
 - validate RUN_ID：检查结构、归档文件、时间与来源关联，不写 completed。
-- finish RUN_ID：校验后由服务渲染 company.md 和 research.json，有 baseline 时生成 review.md；无需第二个人工确认命令。
+- finish RUN_ID：校验后由服务渲染 company.md 和 research.json；有 baseline 时只保存关联，不生成 review.md（比较与 review.md 属于阶段 6）。无需第二个人工确认命令。
 - resume RUN_ID：仅 failed→draft，保留原草稿和来源；completed 拒绝。普通校验失败仍保持 draft，不滥用 failed。
 
 阶段 3–4：
 
 - source-add RUN_ID --input source-request.json：request 含 metadata 及 file 或 url，二者恰好一个。程序取得原始字节、计算哈希和实际 retrieved_at，不能接受用户伪造哈希/获取时间。
 - sources RUN_ID：列表返回元数据与 source_id；source-read RUN_ID SOURCE_ID [--page N | --start-line N] [--limit-lines N]：默认 120 行，上限 300 行与 20000 字符，返回 locator、截断标记和下一段位置。
-- collect RUN_ID [--kind all|market|filings]：all 默认；各任务结果分列，不把 partial_success 当 complete coverage。只做数据收集，不生成评分、不 finish。
+- collect RUN_ID [--kind all|market|filings]：all 默认。market 含报价快照与财务原始数据（富途只读）；filings 发现并归档最近年报/中期/季度报告（HKEX/SEC 公开渠道）。各任务在 `run_steps` 分列，失败/受限写 error_json 与 issues，不把 partial_success 当 complete coverage。只做数据收集，不生成评分、不 finish。至少一个子任务成功时退出 0，全部 failed/blocked 时退出 1。
 
 阶段 6：
 
@@ -98,7 +106,7 @@ requests 连接超时 10 秒、读取超时 90 秒；网络或 429/5xx 最多 2 
 
 不执行下载的脚本、宏或 HTML；提取失败保留原文并明确标状态。PDF 扫描件提示人工补文本，不自动安装 OCR。
 
-公告发现默认回看 3 年，最多 20 条年报/中期/季度及业绩相关候选，自动保存最近 3 个完整年度年报和最新一期业绩材料（以实际可取得内容为准）。十年问题仅凭三年资料不得标完全回答；按问题需要经宿主补历史来源，记录额外检索范围。
+公告发现默认回看 3 年，最多 20 条年报/中期/季度及业绩相关候选，自动保存最近 3 个完整年度年报和最新一期业绩材料（以实际可取得内容为准）。HKEX 用官方 `prefix.do`/`titleSearchServlet.do`，检索 `rowRange` 放宽后过滤相关类别；SEC EDGAR 需环境变量 `WONDER_SEC_USER_AGENT`（SEC 要求带联系方式），未设置时该通道标 blocked，不影响其他能力。十年问题仅凭三年资料不得标完全回答；按问题需要经宿主补历史来源，记录额外检索范围。
 
 provider 来源应另外保存 observed_at 或原始披露的时间依据：retrieved_at 是取得时间，不能当作历史数值的发布时间。start 固定 as_of 后取得的新报价，若 observed_at 晚于 as_of，只保留为本次下载结果，不关联为该 run 的有效证据；公司研究可继续，不能悄悄前移截止时点。财务快照如能通过已归档的一手披露核对发布时间和具体数值，可引用该披露；不能仅因报告期早于 as_of 就认定晚取得的修订数据当时已可用。无法确定时间的 provider 数值保留为缺口/背景。
 
@@ -129,3 +137,24 @@ provider 来源应另外保存 observed_at 或原始披露的时间依据：retr
 直接接模型不会自动赋予浏览、PDF 提取、网络搜索和数据库写入能力；这些仍由现有 Python 工具与显式流程提供。是否加入自主工具循环需独立决策。
 
 核对入口：[DeepSeek 官方 API 文档](https://api-docs.deepseek.com/zh-cn/)。本次只确认存在 API 接入途径，未实际调用或验证任何特定模型效果。
+
+## 9. 编排与宿主边界（2026-09-20 决策）
+
+### 9.1 默认路径
+
+- 领域逻辑继续使用普通 Python 函数、小模块和显式事务。
+- CLI 是稳定的宿主无关接口；OpenCode 通过 skill、受限命令或薄工具调用 CLI，不成为数据库或研究报告的权威来源。
+- OpenCode 会话可以中断，但研究必须能从 `run_id`、SQLite、来源文件和正式产物重建；不能只依赖聊天历史。
+- 只有在已归档材料上生成结构化 `ResearchDraft` 时，优先使用小型 writer；不为了单次模型调用引入图编排。
+
+阶段 5 已实现：project skill 正文位于 `skills/company-research/SKILL.md`，由项目根 `opencode.json` 的 `skills.paths: ["skills"]` 注册，保持唯一正文；宿主只调用第 4 节列出的 CLI，不新增命令、不接 MCP 或模型 SDK。修改 skill 或 `opencode.json` 后需重启 OpenCode 生效。
+
+### 9.2 LangGraph 的启用条件
+
+LangGraph 只能作为阶段 7 之后的可选 orchestration 包，启用前必须有真实运行证据表明至少存在两项问题：动态工具选择、多轮补证据、跨天恢复、独立问题并行，或人工监督流程难以审计。它的节点只能调用现有业务服务；不能直接写 SQLite、修改来源元数据、计算护城河总分或绕过 `validate`/`finish`。
+
+LangGraph 状态只保存 `run_id`、步骤键、结构化中间结果和输出引用；SQLite/文件系统仍是事实来源。若实际需求只是单次结构化写作，继续用 writer；不要以 LangGraph 替代现有 `runs` 和来源归档。
+
+### 9.3 暂不采用的编排系统
+
+Temporal、Prefect 和多 Agent 框架暂不加入首版。只有出现后台调度、远程 worker、多用户并发或跨基础设施长期运行需求时，才重新评估基础设施级 durable execution；这属于产品范围变化，需要单独决策和验收。

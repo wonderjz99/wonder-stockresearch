@@ -12,8 +12,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LOCK_TIMEOUT_SECONDS = 5.0
+STEP_STATUSES = ("pending", "running", "succeeded", "failed", "blocked", "skipped")
+
+_RUN_STEPS_DDL = """
+    CREATE TABLE IF NOT EXISTS run_steps (
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        step_key TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        input_hash TEXT,
+        output_ref TEXT,
+        provider TEXT,
+        model TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        error_json TEXT,
+        PRIMARY KEY (run_id, step_key, attempt)
+    )
+"""
 
 _SCHEMA = (
     """
@@ -63,7 +81,13 @@ _SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS runs_ticker_created ON runs(ticker, created_at)",
+    _RUN_STEPS_DDL,
 )
+
+# 显式递增迁移：键为目标版本，值为从上一版升级到该版需要执行的语句。
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: (_RUN_STEPS_DDL,),
+}
 
 
 class StorageError(Exception):
@@ -119,17 +143,22 @@ def open_db(root: Path) -> Iterator[sqlite3.Connection]:
 
 
 def initialize(root: Path) -> None:
-    """按 PRAGMA user_version 建库；已有表不重建。"""
+    """按 PRAGMA user_version 建库或执行显式迁移；不重建已有表。"""
     with open_db(root) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
-        if version != 0:
-            raise StorageError("schema_version_unsupported", f"未知的数据库版本：{version}")
+        if version > SCHEMA_VERSION:
+            raise StorageError("schema_version_unsupported", f"数据库版本高于本程序：{version}")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            for statement in _SCHEMA:
-                connection.execute(statement)
+            if version == 0:
+                for statement in _SCHEMA:
+                    connection.execute(statement)
+            else:
+                for target in range(version + 1, SCHEMA_VERSION + 1):
+                    for statement in _MIGRATIONS[target]:
+                        connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("COMMIT")
         except Exception:
@@ -190,6 +219,13 @@ def write_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(data)
     temporary.replace(path)
 
 
@@ -357,6 +393,114 @@ def get_run_sources(connection: sqlite3.Connection, run_id: str) -> list[dict[st
         JOIN run_sources ON run_sources.source_id = sources.id
         WHERE run_sources.run_id = ?
         ORDER BY sources.id
+        """,
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_source(connection: sqlite3.Connection, source_id: str) -> dict[str, Any] | None:
+    row = connection.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    return row_to_dict(row)
+
+
+def find_source_by_hash(
+    connection: sqlite3.Connection, ticker: str, sha256: str
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT * FROM sources WHERE ticker = ? AND sha256 = ? ORDER BY retrieved_at LIMIT 1",
+        (ticker, sha256),
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def is_source_linked(connection: sqlite3.Connection, run_id: str, source_id: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM run_sources WHERE run_id = ? AND source_id = ?",
+        (run_id, source_id),
+    ).fetchone()
+    return row is not None
+
+
+def next_step_attempt(connection: sqlite3.Connection, run_id: str, step_key: str) -> int:
+    row = connection.execute(
+        "SELECT COALESCE(MAX(attempt), 0) FROM run_steps WHERE run_id = ? AND step_key = ?",
+        (run_id, step_key),
+    ).fetchone()
+    return int(row[0]) + 1
+
+
+def insert_step(
+    connection: sqlite3.Connection,
+    run_id: str,
+    step_key: str,
+    attempt: int,
+    *,
+    status: str,
+    provider: str | None = None,
+    input_hash: str | None = None,
+    output_ref: str | None = None,
+    error_json: str | None = None,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO run_steps(run_id, step_key, attempt, status, input_hash, output_ref,
+                              provider, model, started_at, finished_at, error_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+        """,
+        (
+            run_id,
+            step_key,
+            attempt,
+            status,
+            input_hash,
+            output_ref,
+            provider,
+            to_iso(started_at) if started_at else None,
+            to_iso(finished_at) if finished_at else None,
+            error_json,
+        ),
+    )
+
+
+def finish_step(
+    connection: sqlite3.Connection,
+    run_id: str,
+    step_key: str,
+    attempt: int,
+    *,
+    status: str,
+    output_ref: str | None = None,
+    error_json: str | None = None,
+    finished_at: datetime | None = None,
+) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE run_steps
+        SET status = ?, output_ref = ?, error_json = ?, finished_at = ?
+        WHERE run_id = ? AND step_key = ? AND attempt = ?
+        """,
+        (
+            status,
+            output_ref,
+            error_json,
+            to_iso(finished_at or now_utc()),
+            run_id,
+            step_key,
+            attempt,
+        ),
+    )
+    return cursor.rowcount
+
+
+def list_steps(connection: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT step_key, attempt, status, input_hash, output_ref, provider, model,
+               started_at, finished_at, error_json
+        FROM run_steps WHERE run_id = ? ORDER BY step_key, attempt
         """,
         (run_id,),
     ).fetchall()

@@ -87,6 +87,14 @@ G4（价格合理性）也属于估值。首版报告结尾只标“估值部分
 
 关键答案、门闸 pass/fail 以及非 null 评分，至少有一项可定位 primary/provider 支持。背景新闻可保留，但不独立支撑关键结论。程序只检查引用关系和元数据，不能声称验证了原文语义；分析者仍需读原文。
 
+“支持”还要求来源在 as_of 时点可用（核心证据的 as_of 可用性）：
+
+1. 发布日期未知的 primary 来源只能作 `context`，不能独立支撑核心结论。
+2. `published_at` 晚于 `draft.as_of` 的来源不能支撑核心结论。
+3. provider 来源若 `metadata.observed_after_as_of=true`，不能支撑核心结论。
+
+该规则适用于 answered 问题、pass/fail 门闸与非 null 护城河评分：存在不可用权威引用时报 `ineligible_as_of_support`，完全没有权威引用时报 `missing_authoritative_support`。资料照常归档、不删除；不足时把结论降级为 partial/missing、insufficient 或 null。
+
 ## 7. 反证、冲突与报告完成
 
 每次研究记录最强相反观点、检索渠道与范围、找到的反方来源、哪些新证据可能推翻结论、下一验证点。没有找到反证时说明范围，禁止单独写“无”。

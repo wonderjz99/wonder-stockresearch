@@ -12,9 +12,10 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from . import research
-from .models import ResearchPacket
+from .models import ResearchPacket, SourceRequest
 from .reports import render_company
 from .research import ResearchError, ValidationIssue, validate_packet
+from .sources import SourceError
 
 
 class CommandError(Exception):
@@ -56,6 +57,24 @@ def _read_packet(input_path: str) -> ResearchPacket:
             f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
         )
         raise CommandError("invalid_packet", f"输入不符合 ResearchPacket：{details}", 2) from error
+
+
+def _read_source_request(input_path: str) -> SourceRequest:
+    try:
+        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise CommandError("invalid_json", f"JSON 格式错误：{error.msg}", 2) from error
+    try:
+        return SourceRequest.model_validate(payload)
+    except ValidationError as error:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+        )
+        raise CommandError("invalid_source_request", f"输入不符合 SourceRequest：{details}", 2) from error
 
 
 def _validation_payload(issues: list[ValidationIssue]) -> list[dict[str, str]]:
@@ -118,6 +137,21 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("run_id")
     resume = subparsers.add_parser("resume", help="把 failed 恢复到 draft")
     resume.add_argument("run_id")
+
+    source_add = subparsers.add_parser("source-add", help="导入 URL 或本地文件并归档")
+    source_add.add_argument("run_id")
+    source_add.add_argument("--input", required=True, help="SourceRequest JSON；- 代表 stdin")
+    sources_cmd = subparsers.add_parser("sources", help="列出 run 的来源")
+    sources_cmd.add_argument("run_id")
+    source_read = subparsers.add_parser("source-read", help="读取来源片段")
+    source_read.add_argument("run_id")
+    source_read.add_argument("source_id")
+    source_read.add_argument("--page", type=int, default=None, help="PDF 页码（从 1 起）")
+    source_read.add_argument("--start-line", type=int, default=None, help="提取文本起始行")
+    source_read.add_argument("--limit-lines", type=int, default=None, help="返回行数，默认 120，上限 300")
+    collect = subparsers.add_parser("collect", help="采集行情/财务/公告")
+    collect.add_argument("run_id")
+    collect.add_argument("--kind", choices=["all", "market", "filings"], default="all")
     return parser
 
 
@@ -160,6 +194,31 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
     if args.command == "resume":
         _emit(True, research.resume_run(root, args.run_id), [])
         return 0
+    if args.command == "source-add":
+        request = _read_source_request(args.input)
+        _emit(True, research.source_add(root, args.run_id, request), [])
+        return 0
+    if args.command == "sources":
+        _emit(True, research.list_sources(root, args.run_id), [])
+        return 0
+    if args.command == "source-read":
+        if args.page is not None and args.start_line is not None:
+            raise CommandError("invalid_locator", "--page 与 --start-line 不能同时使用", 2)
+        data = research.read_source(
+            root,
+            args.run_id,
+            args.source_id,
+            page=args.page,
+            start_line=args.start_line,
+            limit_lines=args.limit_lines,
+        )
+        _emit(True, data, [])
+        return 0
+    if args.command == "collect":
+        data, issues = research.collect(root, args.run_id, args.kind)
+        succeeded = int(data.get("succeeded", 0)) > 0
+        _emit(succeeded, data, _validation_payload(issues))
+        return 0 if succeeded else 1
     raise CommandError("unknown_command", f"未实现的命令：{args.command}", 2)
 
 
@@ -189,6 +248,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_business(root, args)
     except CommandError as error:
         _emit(False, {}, [_error_issue(error.code, "command", error.message)])
+        return error.exit_code
+    except SourceError as error:
+        _emit(False, {}, [_error_issue(error.code, "source", error.message)])
         return error.exit_code
     except ResearchError as error:
         issues = _validation_payload(error.issues) or [

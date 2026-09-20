@@ -13,7 +13,8 @@
 - SQLite 适用于本地应用与低并发存储：[官方说明](https://www.sqlite.org/whentouse.html)。
 - OpenCode 支持工具与权限配置：[工具文档](https://opencode.ai/docs/tools/)。先通过 CLI 使用 Python，后续必要时才接 MCP。
 - Pi Coding Agent 支持 skills、会话与扩展，推荐 CLI 或扩展接入外部能力：[官方仓库](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md)。本版未对 OpenCode/Pi 做实际同条件性能对比，不宣称哪一个更省 token 或更准确。
-- 富途 SDK：[官方仓库](https://github.com/FutunnOpen/py-futu-api)。实施连接时重新验证可用接口与版本。
-- SEC：[开发者入口](https://www.sec.gov/about/developer-resources)。HKEX：[披露入口](https://www.hkexnews.hk/)。公司 IR 使用各公司正式网站。
+- 富途 SDK：[官方仓库](https://github.com/FutunnOpen/py-futu-api)。2026-09-20 实测锁定 `futu-api==10.11.7108`：`OpenQuoteContext.get_market_snapshot` 与 `get_financials_statements`（statement_type 1–4，financial_type=ANNUAL）在本机 OpenD 返回真实数据；仅使用行情上下文，不调用账户/交易接口。
+- SEC：[开发者入口](https://www.sec.gov/about/developer-resources)。2026-09-20 实测 `https://www.sec.gov/files/company_tickers.json` 在缺少带联系方式 User-Agent 时返回 403，故 SEC 通道需 `WONDER_SEC_USER_AGENT`，本环境未配置、标 blocked。
+- HKEX：[披露入口](https://www.hkexnews.hk/)。2026-09-20 实测官方检索 `https://www1.hkexnews.hk/search/prefix.do`（查 stockId）与 `titleSearchServlet.do`（公告列表）返回真实数据。公司 IR 使用各公司正式网站。
 
 这些外部链接是出处与实施核对入口，不是本地规格缺失内容的替代品。
