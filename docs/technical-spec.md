@@ -1,6 +1,6 @@
 # 技术规格 v1
 
-本文件给出首版实施默认值，供新会话直接实现。边界来源于 PLAN；字段、CLI 名称、超时等为工程默认值，可因实际接口验证做不改变产品语义的小幅修正并记录。首版没有模型 API 调用或密钥存储；后续直接接模型 API 的扩展边界见第 8 节，编排演进边界见第 9 节。
+本文件给出本版本实施默认值，供新会话直接实现。边界来源于 PLAN；字段、CLI 名称、超时等为工程默认值，可因实际接口验证做不改变产品语义的小幅修正并记录。当前阶段没有模型 API 调用或密钥存储；阶段 7 的直接 DeepSeek 写作边界见第 8 节，编排演进边界见第 9 节。
 
 ## 1. 模块与依赖
 
@@ -44,13 +44,13 @@ Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 
 
 阶段 4 已实现一张轻量运行步骤表 `run_steps`（schema v2，经 v1→v2 显式迁移加入），作为 `runs` 的执行明细，不是事件溯源或通用任务队列：
 
-- `run_steps(run_id FK, step_key, attempt, status, input_hash nullable, output_ref nullable, provider nullable, model nullable, started_at nullable, finished_at nullable, error_json nullable, PRIMARY KEY(run_id,step_key,attempt))`。
+- `run_steps(run_id FK, step_key, attempt, status, input_hash nullable, output_ref nullable, provider nullable, model nullable, started_at nullable, finished_at nullable, error_json nullable, PRIMARY KEY(run_id,step_key,attempt))`。阶段 7 将以显式 v2→v3 migration 增加 `metadata_json nullable`，仅保存模板版本和可取得的用量摘要等受控运行元数据。
 - `status` 只允许 `pending`、`running`、`succeeded`、`failed`、`blocked`、`skipped`；`attempt` 从 1 开始递增。
 - `output_ref` 只指向已有的来源、草稿或受控 JSON 产物，不把大段原文或隐藏推理塞进步骤表。
 - 采集器和未来 writer 使用它记录可重试边界、输入哈希、provider 错误和输出引用；`runs.draft_json` 仍是草稿的正式内容。`output_ref` 形如 `source:<uuid>`。
 - 此表通过显式 schema migration（`_MIGRATIONS` v1→v2）加入，`initialize` 对已有 v1 库执行迁移，不重建已有表。
 
-foreign_keys=ON、busy_timeout=5000；首版使用默认 journal，不先开 WAL。PRAGMA user_version 管理 schema，阶段 1–3 为 1、阶段 4 为 2；只添加显式递增迁移，不每次启动重建表。
+foreign_keys=ON、busy_timeout=5000；首版使用默认 journal，不先开 WAL。PRAGMA user_version 管理 schema，阶段 1–3 为 1、阶段 4–6 为 2、阶段 7 为 3；只添加显式递增迁移，不每次启动重建表。
 
 答案保存在 runs.draft_json，SQL 不拆成 claim/evidence 图数据库。JSON 是 SQLite 的正式内容；导出 research.json 是同内容快照。原文文件是字节事实源。Markdown 为视图，手工修改不回写数据库。
 
@@ -74,7 +74,7 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 - status RUN_ID / history TICKER：返回状态、质量信息、来源摘要/历史元数据，不一次吐所有原文。
 - save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources。阶段 5 起校验会把 packet 内来源与该 run 已挂来源合并（`_effective_sources`），因此宿主引用 collect/source-add 已归档的来源时 `sources` 可留空，不会误报 `unknown_source`；真正未归档的引用仍被拒绝。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
 - validate RUN_ID：检查结构、归档文件、时间与来源关联，不写 completed。
-- finish RUN_ID：校验后由服务渲染 company.md 和 research.json；有 baseline 时只保存关联，不生成 review.md（比较与 review.md 属于阶段 6）。无需第二个人工确认命令。
+- finish RUN_ID：校验后由服务渲染 company.md 和 research.json；有 baseline 时再渲染 review.md，并把 comparison 写入 research.json，三者哈希一并记录。旧 run 的产物不改写。无需第二个人工确认命令。
 - resume RUN_ID：仅 failed→draft，保留原草稿和来源；completed 拒绝。普通校验失败仍保持 draft，不滥用 failed。
 
 阶段 3–4：
@@ -83,10 +83,14 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 - sources RUN_ID：列表返回元数据与 source_id；source-read RUN_ID SOURCE_ID [--page N | --start-line N] [--limit-lines N]：默认 120 行，上限 300 行与 20000 字符，返回 locator、截断标记和下一段位置。
 - collect RUN_ID [--kind all|market|filings]：all 默认。market 含报价快照与财务原始数据（富途只读）；filings 发现并归档最近年报/中期/季度报告（HKEX/SEC 公开渠道）。各任务在 `run_steps` 分列，失败/受限写 error_json 与 issues，不把 partial_success 当 complete coverage。只做数据收集，不生成评分、不 finish。至少一个子任务成功时退出 0，全部 failed/blocked 时退出 1。
 
-阶段 6：
+阶段 6（已实现）：
 
-- compare RUN_ID：要求 baseline；生成/返回结构化差异，未完成草稿可以预览，但正式 review.md 随 finish 固化。
-- backup --output PATH：创建新目录，不覆盖已有备份，目标限项目 data/backups/；输出 manifest 与恢复说明。
+- compare RUN_ID：要求 baseline；Python 计算问题状态、门闸结果、护城河分数与总分的结构差异，并区分本次新增来源与沿用基准来源。未完成草稿可以预览；正式 review.md 随 finish 固化。任一侧分值为 null 时差值输出 null（不适用）；schema 或口径不同时 `comparable=false`，不算分差。
+- backup --output PATH：目标限项目 data/backups/ 下的新目录，不覆盖已有备份。在项目写锁内用 SQLite backup API 生成 `wonder.db`，复制已归档来源与 completed run 产物到 `files/<相对路径>`，写 `manifest.json`（含每个文件与数据库的 SHA-256、missing 列表）和 `RESTORE.md`。锁被占用时报 `lock_timeout`（exit 1），业务写入不被静默并发。
+
+阶段 7（规划，尚未实现）：
+
+- `write-draft RUN_ID --provider deepseek [--model MODEL]`：只对已有、未完成 run 的本地归档来源写作；读取运行环境 `DEEPSEEK_API_KEY`，生成 `ResearchDraft` 后调用既有 save-draft/validate，不自动 `finish`。provider 仅允许 `deepseek`；实际模型默认值、端点、超时和预算须在实施时查验官方文档并写入阶段 7 文档。
 
 所有命令在模型传值前有 --help，输入错误给出字段路径和修正说明。工具能力只允许文档中列出的操作，不提供任意 Python/SQL 执行命令。
 
@@ -118,20 +122,20 @@ provider 来源应另外保存 observed_at 或原始披露的时间依据：retr
 
 第 1 阶段实际建立后应能运行 uv run pytest 和 uv run ruff check .；把确实运行的结果写入 PROGRESS，不预先填写通过。每阶段文档需使用真实符号和已运行命令。
 
-备份验证：用 SQLite backup API、一份 sources/与completed run 文件清单及 SHA-256 manifest；恢复演练创建项目内临时根，验证 schema、外键、原文哈希和 completed 产物。暂不实现云同步、自动定时备份或事件重放。
+备份验证（阶段 6 已实现）：用 SQLite backup API、一份 sources/ 与 completed run 文件清单及 SHA-256 manifest；恢复演练创建临时根，复制 `wonder.db` 与 `files/`，验证历史可读、原文 `source-read` 可读、completed 产物哈希（含 review.md）一致。暂不实现云同步、自动定时备份或事件重放。
 
-## 8. 后续直接调用 LLM 写报告（非首版实现）
+## 8. 阶段 7：直接调用 DeepSeek 写报告（规划，尚未实现）
 
-用户明确希望以后能接 DeepSeek 等模型 API。首版保持研究模型、证据、存储、校验和渲染独立于宿主；本节记录扩展接点，不要求现在创建空接口、SDK 依赖或 provider 注册框架。
+用户已确认本版本在阶段 6 后接入 DeepSeek API。当前实现保持研究模型、证据、存储、校验和渲染独立于宿主；本节规定阶段 7 接点，不要求现在创建空接口、SDK 依赖或 provider 注册框架。
 
 建议未来新增一个小型 writer 模块：从现有 run、研究规则与带 source_id/locator 的原文片段构造上下文，模型返回 ResearchDraft，再调用现有研究服务保存与验证。写作与数据采集分开；仅给已有材料写作不需要完整 Agent 循环。将来若需模型自己搜索和调用工具，再单独设计该执行过程。
 
-- 输入：run_id、明确选择的模型配置，以及从本地规则和归档材料构造的上下文；不依赖读取 OpenCode 私有会话数据库。
-- 输出：满足既有 schema 的 ResearchDraft；模型不能新造 source_id、修改来源日期或跳过门闸/反证要求，评分总分仍由 Python 计算。
-- 单供应商起步，DeepSeek 为用户举例的优先候选；API 格式兼容不代表结构化输出、工具、参数完全相同，实际接入时依官方文档和测试确认。
+- 输入：run_id、明确选择的模型配置，以及从本地规则和归档材料构造的受限上下文；不依赖读取 OpenCode 私有会话数据库。
+- 输出：满足既有 schema 的 ResearchDraft；模型不能新造 source_id、locator、来源日期或跳过门闸/反证要求，评分总分仍由 Python 计算。
+- 单供应商起步，阶段 7 固定为 DeepSeek；不因 API 格式兼容而假定结构化输出、参数或模型能力，实际接入时依官方文档和测试确认。
 - 设置明确超时、输出限制和调用预算；不合格 JSON/schema/引用返回错误与草稿，不无限自动重试、不因修复失败强行 finish。
 - 用户在运行环境自行设置凭据。程序可读取环境变量用于请求，但不得持久化或输出密钥/请求认证头；对话中不得索取秘密。不新增 .env 密钥文件到仓库。
-- 记录供应商、模型、提示模板版本及可取得的用量摘要，禁止保存隐藏推理或敏感认证内容。
+- 在 `run_steps` 的阶段 7 `metadata_json` 记录供应商、模型、输入哈希、提示模板版本、受控输出引用及可取得的用量摘要；禁止保存认证头、完整提示词、隐藏推理或敏感认证内容。
 - 测试使用 fake LLM 返回正常草稿、非法 JSON、虚假引用和超时，确认失败不生成 completed 报告；真实 API smoke 在用户要求该阶段且运行环境准备好后进行。
 
 直接接模型不会自动赋予浏览、PDF 提取、网络搜索和数据库写入能力；这些仍由现有 Python 工具与显式流程提供。是否加入自主工具循环需独立决策。
@@ -151,7 +155,7 @@ provider 来源应另外保存 observed_at 或原始披露的时间依据：retr
 
 ### 9.2 LangGraph 的启用条件
 
-LangGraph 只能作为阶段 7 之后的可选 orchestration 包，启用前必须有真实运行证据表明至少存在两项问题：动态工具选择、多轮补证据、跨天恢复、独立问题并行，或人工监督流程难以审计。它的节点只能调用现有业务服务；不能直接写 SQLite、修改来源元数据、计算护城河总分或绕过 `validate`/`finish`。
+LangGraph 只能作为阶段 7 完成之后的可选 orchestration 包，启用前必须有真实运行证据表明至少存在两项问题：动态工具选择、多轮补证据、跨天恢复、独立问题并行，或人工监督流程难以审计。它的节点只能调用现有业务服务；不能直接写 SQLite、修改来源元数据、计算护城河总分或绕过 `validate`/`finish`。
 
 LangGraph 状态只保存 `run_id`、步骤键、结构化中间结果和输出引用；SQLite/文件系统仍是事实来源。若实际需求只是单次结构化写作，继续用 writer；不要以 LangGraph 替代现有 `runs` 和来源归档。
 

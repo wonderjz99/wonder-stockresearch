@@ -2,7 +2,7 @@
 
 一个从零实现的个人港股、美股公司研究助手，同时作为逐步学习 Python 研究应用的项目。
 
-**当前状态：已完成阶段 5 的 OpenCode + CLI 端到端研究。** 可运行阶段 1 的 `validate-packet`/`render-packet`，阶段 2 的 `watch`、`start`、`save-draft`、`validate`、`finish`、`resume`、`status`、`history`，阶段 3 的 `source-add`、`sources`、`source-read`，阶段 4 的 `collect`（富途只读行情/财务 + HKEX/SEC 公告发现，带 `run_steps` 账本），以及阶段 5 的 project skill `skills/company-research/`（由 `opencode.json` 的 `skills.paths` 注册）。已用它完成一次 HK.00728 人工监督端到端研究。附记、估值与复评 compare 仍未实现。
+**当前状态：已完成阶段 6 的手动复评、备份与维护。** 可运行阶段 1 的 `validate-packet`/`render-packet`，阶段 2 的 `watch`、`start`、`save-draft`、`validate`、`finish`、`resume`、`status`、`history`，阶段 3 的 `source-add`、`sources`、`source-read`，阶段 4 的 `collect`（富途只读行情/财务 + HKEX/SEC 公告发现，带 `run_steps` 账本），阶段 5 的 project skill `skills/company-research/`（由 `opencode.json` 的 `skills.paths` 注册），以及阶段 6 的 `compare`、`backup` 与有 baseline 时 `finish` 生成 `review.md`。阶段 7 的 DeepSeek 直接写作入口是本版本必做交付，尚未实现。
 
 ## 在新 Codex 会话中继续
 
@@ -35,7 +35,7 @@
 
 先做独立 Python CLI，再由 OpenCode 使用。当前不把核心改成 Agent；OpenCode 是受人工监督的宿主，SQLite/文件和 Python 服务才是研究事实来源。阶段 4 已增加轻量 `run_steps` 执行明细（schema v2），用于采集任务、失败重试和 provider 错误记录，但不引入通用工作流框架。
 
-Pi Coding Agent 可以在以后试用同一 CLI，首版不同时适配两个宿主。后续可由 Python 直接调用 DeepSeek 等模型 API 生成结构化研究草稿，复用同一套校验、评分与报告服务；只有真实端到端研究出现动态补证据、跨天恢复或多步并行等需求时，才评估独立的 LangGraph 编排层。Temporal、Prefect、多 Agent 和 MCP 均不属于当前首版。
+Pi Coding Agent 可以在以后试用同一 CLI，首版不同时适配两个宿主。阶段 7 将由 Python 直接调用 DeepSeek 生成结构化研究草稿，复用同一套校验、评分与报告服务，并保持用户显式 `finish`；只有在阶段 7 后的真实运行出现动态补证据、跨天恢复或多步并行等需求时，才评估独立的 LangGraph 编排层。Temporal、Prefect、多 Agent 和 MCP 均不属于当前版本。
 
 ## 在 OpenCode 中使用
 
@@ -59,6 +59,7 @@ Pi Coding Agent 可以在以后试用同一 CLI，首版不同时适配两个宿
 - [阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)：下载/导入、哈希、提取与片段读取。
 - [阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)：collect、run_steps、HKEX/SEC 与富途适配器。
 - [阶段 5：OpenCode + CLI 端到端研究](docs/05-opencode-and-tools.md)：project skill、宿主职责与 HK.00728 实跑记录。
+- [阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)：compare、review.md、backup 与恢复验证。
 - [研究规格](docs/research-spec.md)：问题、门闸、评分和证据规则。
 - [技术规格](docs/technical-spec.md)：数据与 CLI 契约。
 - [教学约定](docs/teaching-contract.md)：每阶段如何实现、验证和讲解。
@@ -78,8 +79,11 @@ uv run wonder-research --help
 uv run wonder-research --root <项目根> start HK.00728
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind filings
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind market
+uv run wonder-research --root <项目根> start HK.00728 --baseline <BASELINE_RUN>
+uv run wonder-research --root <项目根> compare <RUN_ID>
+uv run wonder-research --root <项目根> backup --output data/backups/<NAME>
 ```
 
 `collect --kind market` 需要本机 OpenD（默认 `127.0.0.1:11111`，可用 `WONDER_FUTU_HOST`/`WONDER_FUTU_PORT` 覆盖），只读行情/财务；`collect --kind filings` 使用 HKEX 官方渠道，SEC 通道需设置 `WONDER_SEC_USER_AGENT`。这些都是用户运行环境配置，程序不读取账户秘密。
 
-各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5：OpenCode + CLI 端到端研究](docs/05-opencode-and-tools.md)。正式报告由 `finish` 从已校验草稿生成并归档；`render-packet` 仍只是离线样例，不是正式完成记录。
+各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5：OpenCode + CLI 端到端研究](docs/05-opencode-and-tools.md)、[阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)。正式报告由 `finish` 从已校验草稿生成并归档；有 baseline 时同时生成 `review.md`；`render-packet` 仍只是离线样例，不是正式完成记录。

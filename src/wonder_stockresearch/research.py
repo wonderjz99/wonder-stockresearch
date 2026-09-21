@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -91,20 +92,49 @@ def _statement_references(statement: Statement, location: str) -> Iterable[tuple
             yield reference, f"{location}.numbers[{number_index}].evidence[{evidence_index}]"
 
 
+def _as_aware(value: datetime) -> datetime:
+    """把可能缺少时区的时间按 UTC 处理，避免与带时区的 as_of 比较时报错。"""
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _parse_metadata_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return storage.parse_iso(value)
+    except ValueError:
+        return None
+
+
 def _is_core_eligible(source: Source, as_of: datetime) -> bool:
     """核心结论只能由 as_of 时点已可用的一手/ provider 来源支撑。
 
-    - primary：必须有已知发布日期且不晚于 as_of；发布日期未知只作背景。
-    - provider：metadata.observed_after_as_of 为 true 时不可用；已知发布日期同样受 as_of 限制。
+    - primary：必须有已知发布日期且不晚于 as_of；只有日期时以当地日终为保守可用时点；
+      发布日期未知只作背景。
+    - provider：必须有可解析的 metadata.observed_at 且不晚于 as_of，且
+      metadata.observed_after_as_of 不为 true；观测晚于 as_of 时只作本次下载结果。
     - secondary / legacy：不独立支撑核心结论。
     """
     if source.kind not in {"primary", "provider"}:
         return False
-    if source.published_at is not None and source.published_at > as_of:
+    published_at = _as_aware(source.published_at) if source.published_at is not None else None
+    if published_at is not None and published_at > as_of:
         return False
     if source.kind == "primary":
-        return source.published_at is not None
-    return source.metadata.get("observed_after_as_of") is not True
+        if published_at is None:
+            return False
+        if source.publication_precision == "date":
+            end_of_day = published_at.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return as_of >= end_of_day
+        return True
+    if source.metadata.get("observed_after_as_of") is True:
+        return False
+    observed_at = _parse_metadata_time(source.metadata.get("observed_at"))
+    if observed_at is None:
+        return False
+    return observed_at <= as_of
 
 
 def _core_support_status(
@@ -138,7 +168,7 @@ def _core_support_issue(
             "ineligible_as_of_support",
             location,
             "supporting 引用的 primary/provider 来源在 as_of 时点不可用"
-            "（无已知发布日期或 observed_after_as_of），只能作 context",
+            "（无已知发布日期、provider 缺 observed_at、或发布时间/观测时间晚于 as_of），只能作 context",
         )
     return ValidationIssue(
         "missing_authoritative_support",
@@ -478,7 +508,7 @@ def _verify_completed_artifacts(root: Path, run: dict[str, object]) -> dict[str,
 
 
 def finish_run(root: Path, run_id: str) -> dict[str, object]:
-    from .reports import render_company
+    from .reports import render_company, render_review
 
     storage.initialize(root)
     with storage.project_lock(root), storage.open_db(root) as connection:
@@ -497,6 +527,13 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             )
         draft = packet.draft
         company_markdown = render_company(packet, archived=True, run_id=run_id)
+        comparison: dict[str, object] | None = None
+        baseline_id = run["baseline_run_id"]
+        if baseline_id:
+            baseline = _require_run(connection, str(baseline_id))
+            if baseline["status"] != "completed":
+                raise ResearchError("baseline_not_completed", "基准 run 尚未完成", exit_code=2)
+            comparison = _build_comparison(connection, run, baseline, current_status="completed")
         snapshot = {
             "schema_version": draft.schema_version,
             "run_id": run_id,
@@ -509,6 +546,8 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             "draft": json.loads(draft.model_dump_json()),
             "sources": [json.loads(source.model_dump_json()) for source in packet.sources],
         }
+        if comparison is not None:
+            snapshot["comparison"] = comparison
         directory = storage.run_dir(
             root, run["ticker"], storage.parse_iso(run["created_at"]), run_id  # type: ignore[arg-type]
         )
@@ -518,6 +557,8 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
                 directory / "research.json",
                 json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
             )
+            if comparison is not None:
+                storage.write_atomic(directory / "review.md", render_review(comparison))
         except OSError as error:
             storage.mark_run_failed(
                 connection,
@@ -531,6 +572,8 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             "company.md": storage.sha256_file(directory / "company.md"),
             "research.json": storage.sha256_file(directory / "research.json"),
         }
+        if comparison is not None:
+            hashes["review.md"] = storage.sha256_file(directory / "review.md")
         connection.execute("BEGIN IMMEDIATE")
         try:
             updated = storage.mark_run_completed(
@@ -1150,3 +1193,311 @@ def collect(
         "blocked": blocked,
     }
     return data, issues
+
+
+def _score_diff(baseline: int | None, current: int | None) -> int | None:
+    """缺任一分值时差值不计算，避免把未知当作零。"""
+    if baseline is None or current is None:
+        return None
+    return current - baseline
+
+
+def _draft_referenced_source_ids(draft: ResearchDraft) -> set[str]:
+    referenced: set[str] = set()
+
+    def collect(statement: Statement) -> None:
+        for reference, _ in _statement_references(statement, "statement"):
+            referenced.add(source_id_text(reference.source_id))
+
+    for answer in draft.answers:
+        for statement in answer.statements:
+            collect(statement)
+    for gate in draft.gates:
+        collect(gate.rationale)
+    for moat in draft.moats:
+        collect(moat.rationale)
+    collect(draft.challenge.counterargument)
+    collect(draft.conclusion)
+    for conflict in draft.conflicts:
+        for source_id in conflict.source_ids:
+            referenced.add(source_id_text(source_id))
+    for explanation in draft.review_explanations:
+        collect(explanation.statement)
+    return referenced
+
+
+def _build_comparison(
+    connection: object,
+    run: dict[str, object],
+    baseline: dict[str, object],
+    *,
+    current_status: str | None = None,
+) -> dict[str, object]:
+    """纯计算 baseline 与当前 run 的结构差异；不写文件、不改数据库。"""
+    current_packet = _packet_from_run(connection, run)
+    baseline_packet = _packet_from_run(connection, baseline)
+    current_draft = current_packet.draft
+    baseline_draft = baseline_packet.draft
+    comparable = (
+        current_draft.schema_version == baseline_draft.schema_version
+        and current_draft.ticker == baseline_draft.ticker
+    )
+
+    baseline_answers = {answer.question_id: answer for answer in baseline_draft.answers}
+    current_answers = {answer.question_id: answer for answer in current_draft.answers}
+    answers: list[dict[str, object]] = []
+    for question_id in QUESTION_IDS:
+        previous = baseline_answers.get(question_id)
+        latest = current_answers.get(question_id)
+        previous_status = previous.status if previous else None
+        latest_status = latest.status if latest else None
+        answers.append(
+            {
+                "question_id": question_id,
+                "baseline_status": previous_status,
+                "current_status": latest_status,
+                "changed": previous_status != latest_status,
+            }
+        )
+
+    baseline_gates = {gate.gate_id: gate for gate in baseline_draft.gates}
+    current_gates = {gate.gate_id: gate for gate in current_draft.gates}
+    gates: list[dict[str, object]] = []
+    for gate_id in GATE_IDS:
+        previous = baseline_gates.get(gate_id)
+        latest = current_gates.get(gate_id)
+        previous_result = previous.result if previous else None
+        latest_result = latest.result if latest else None
+        gates.append(
+            {
+                "gate_id": gate_id,
+                "baseline_result": previous_result,
+                "current_result": latest_result,
+                "changed": previous_result != latest_result,
+            }
+        )
+
+    baseline_moats = {moat.dimension_id: moat for moat in baseline_draft.moats}
+    current_moats = {moat.dimension_id: moat for moat in current_draft.moats}
+    moats: list[dict[str, object]] = []
+    for dimension_id in MOAT_IDS:
+        previous = baseline_moats.get(dimension_id)
+        latest = current_moats.get(dimension_id)
+        previous_score = previous.score if previous else None
+        latest_score = latest.score if latest else None
+        moats.append(
+            {
+                "dimension_id": dimension_id,
+                "baseline_score": previous_score,
+                "current_score": latest_score,
+                "diff": _score_diff(previous_score, latest_score) if comparable else None,
+                "changed": previous_score != latest_score,
+            }
+        )
+
+    baseline_total = derive_score_total(baseline_draft)
+    current_total = derive_score_total(current_draft)
+
+    baseline_source_ids = {
+        row["id"] for row in storage.get_run_sources(connection, baseline["id"])  # type: ignore[arg-type]
+    }
+    current_rows = storage.get_run_sources(connection, run["id"])  # type: ignore[arg-type]
+    current_source_ids = {row["id"] for row in current_rows}
+    new_source_ids = sorted(current_source_ids - baseline_source_ids)
+    reused_source_ids = sorted(current_source_ids & baseline_source_ids)
+    new_source_set = set(new_source_ids)
+    new_sources: list[dict[str, object]] = []
+    for row in current_rows:
+        if row["id"] not in new_source_set:
+            continue
+        source = Source.model_validate_json(row["source_json"])
+        new_sources.append(
+            {
+                "source_id": row["id"],
+                "title": source.title,
+                "kind": source.kind,
+                "retrieved_at": row["retrieved_at"],
+                "published_at": source.published_at.isoformat() if source.published_at else None,
+            }
+        )
+
+    referenced = _draft_referenced_source_ids(current_draft)
+    explanations = [
+        {
+            "target_id": explanation.target_id,
+            "kind": explanation.statement.kind,
+            "text": explanation.statement.text,
+        }
+        for explanation in current_draft.review_explanations
+    ]
+    return {
+        "run_id": run["id"],
+        "baseline_run_id": baseline["id"],
+        "ticker": run["ticker"],
+        "comparable": comparable,
+        "baseline": {
+            "as_of": baseline["as_of"],
+            "completed_at": baseline["completed_at"],
+            "schema_version": baseline_draft.schema_version,
+        },
+        "current": {
+            "as_of": current_draft.as_of.isoformat(),
+            "status": current_status or run["status"],
+            "schema_version": current_draft.schema_version,
+        },
+        "score_total": {
+            "baseline": baseline_total,
+            "current": current_total,
+            "diff": _score_diff(baseline_total, current_total) if comparable else None,
+        },
+        "answers": answers,
+        "gates": gates,
+        "moats": moats,
+        "evidence": {
+            "new_source_ids": new_source_ids,
+            "reused_source_ids": reused_source_ids,
+            "new_sources": new_sources,
+            "referenced_new_source_ids": sorted(referenced & new_source_set),
+            "referenced_reused_source_ids": sorted(referenced & set(reused_source_ids)),
+        },
+        "changes": {
+            "answers_changed": sum(1 for item in answers if item["changed"]),
+            "gates_changed": sum(1 for item in gates if item["changed"]),
+            "moats_changed": sum(1 for item in moats if item["changed"]),
+            "score_total_changed": (baseline_total != current_total),
+        },
+        "review_explanations": explanations,
+    }
+
+
+def compare_runs(root: Path, run_id: str) -> dict[str, object]:
+    """与 baseline 比较结构化差异；草稿可预览，正式 review.md 在 finish 固化。"""
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        run = _require_run(connection, run_id)
+        baseline_id = run["baseline_run_id"]
+        if not baseline_id:
+            raise ResearchError("no_baseline", "该 run 没有关联 baseline，无法 compare", exit_code=2)
+        if not run["draft_json"]:
+            raise ResearchError("empty_draft", "该 run 还没有保存草稿", exit_code=2)
+        baseline = _require_run(connection, str(baseline_id))
+        if baseline["status"] != "completed":
+            raise ResearchError("baseline_not_completed", "基准 run 尚未完成", exit_code=2)
+        return _build_comparison(connection, run, baseline)
+
+
+def _backup_destination(root: Path, output: str) -> Path:
+    backups_root = (root / "data" / "backups").resolve()
+    requested = Path(output)
+    destination = (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    if destination == backups_root or not destination.is_relative_to(backups_root):
+        raise ResearchError(
+            "invalid_backup_output", "--output 必须是 root/data/backups/ 下的新目录", exit_code=2
+        )
+    return destination
+
+
+RESTORE_INSTRUCTIONS = """# 备份恢复说明
+
+本目录由 `wonder-research backup` 生成，包含一致性的 SQLite 快照、已归档原文与完成报告。
+
+恢复步骤（目标为任意项目根 `<root>`）：
+
+1. 新建 `<root>` 并放入本项目的 `pyproject.toml`。
+2. 复制 `wonder.db` 到 `<root>/data/wonder.db`。
+3. 按 `manifest.json` 中 `files[].path`（项目相对路径），把 `files/<path>` 复制到 `<root>/<path>`。
+4. 校验：对 `manifest.json` 的每个 `files[].sha256` 与实际文件比对；数据库 `database.sha256` 亦然。
+5. 运行 `uv run wonder-research --root <root> history <TICKER>` 与 `status <RUN_ID>` 确认历史可读；
+   `finish <RUN_ID>` 对已完成 run 只核对产物哈希，不应改写。
+
+注意：备份是只读快照；恢复后不要在旧根上继续写入同一 run。
+"""
+
+
+def backup(
+    root: Path,
+    output: str,
+    *,
+    lock_timeout: float = storage.LOCK_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    """在写锁内用 SQLite backup API + 文件拷贝生成备份；不覆盖已有备份。"""
+    storage.initialize(root)
+    destination = _backup_destination(root, output)
+    with storage.project_lock(root, timeout=lock_timeout):
+        if destination.exists():
+            raise ResearchError("backup_exists", f"备份目录已存在：{output}", exit_code=2)
+        files_root = destination / "files"
+        files_root.mkdir(parents=True)
+        database_path = destination / "wonder.db"
+        storage.backup_database(root, database_path)
+        entries: list[dict[str, object]] = []
+        missing: list[str] = []
+        with storage.open_db(root) as connection:
+            sources = storage.list_all_sources(connection)
+            completed_runs = storage.list_completed_runs(connection)
+        for row in sources:
+            for key in ("raw_path", "text_path"):
+                relative = row.get(key)
+                if not relative:
+                    continue
+                source_path = root / str(relative)
+                if not source_path.is_file():
+                    if str(relative).startswith("data/stocks/"):
+                        missing.append(str(relative))
+                    continue
+                target = files_root / str(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, target)
+                entries.append(
+                    {
+                        "path": str(relative),
+                        "kind": "source",
+                        "sha256": storage.sha256_file(target),
+                    }
+                )
+        for run in completed_runs:
+            directory = storage.run_dir(
+                root,
+                run["ticker"],
+                storage.parse_iso(run["created_at"]),
+                run["id"],
+            )
+            if not directory.is_dir():
+                missing.append(storage.relative_path(root, directory))
+                continue
+            for artifact in sorted(directory.iterdir()):
+                if not artifact.is_file():
+                    continue
+                relative = storage.relative_path(root, artifact)
+                target = files_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(artifact, target)
+                entries.append(
+                    {
+                        "path": relative,
+                        "kind": "run_artifact",
+                        "sha256": storage.sha256_file(target),
+                    }
+                )
+        manifest = {
+            "created_at": storage.to_iso(storage.now_utc()),
+            "schema_version": storage.SCHEMA_VERSION,
+            "database": {
+                "path": "wonder.db",
+                "sha256": storage.sha256_file(database_path),
+            },
+            "file_count": len(entries),
+            "files": entries,
+            "missing": missing,
+        }
+        manifest_path = destination / "manifest.json"
+        storage.write_atomic(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        storage.write_atomic(destination / "RESTORE.md", RESTORE_INSTRUCTIONS)
+    return {
+        "output": storage.relative_path(root, destination),
+        "database": "wonder.db",
+        "file_count": len(entries),
+        "missing": missing,
+        "manifest": storage.relative_path(root, manifest_path),
+        "manifest_sha256": storage.sha256_file(manifest_path),
+    }

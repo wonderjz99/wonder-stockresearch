@@ -505,3 +505,29 @@ def list_steps(connection: sqlite3.Connection, run_id: str) -> list[dict[str, An
         (run_id,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_all_sources(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute("SELECT * FROM sources ORDER BY ticker, id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_completed_runs(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT * FROM runs WHERE status = 'completed'
+        ORDER BY ticker, created_at, id
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def backup_database(root: Path, destination: Path) -> None:
+    """用 SQLite backup API 生成一致性快照；调用方负责先取得项目写锁。"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with open_db(root) as source:
+        target = sqlite3.connect(destination)
+        try:
+            source.backup(target)
+        finally:
+            target.close()

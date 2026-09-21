@@ -112,3 +112,97 @@ def render_company(packet: ResearchPacket, *, archived: bool = False, run_id: st
             f"- `{source_id_text(source.id)}`：{source.title}（{source.kind}；发布：{published_at}；{origin}）"
         )
     return "\n".join(lines) + "\n"
+
+
+def _value_or_unknown(value: object) -> str:
+    return "未评估（null）" if value is None else str(value)
+
+
+def _diff_text(diff: object) -> str:
+    if diff is None:
+        return "不适用（缺少分值或不可比）"
+    return str(diff)
+
+
+def render_review(comparison: dict) -> str:
+    """把 compare 的结构化差异渲染为固定 Markdown；不改写旧报告。"""
+    baseline = comparison["baseline"]
+    current = comparison["current"]
+    total = comparison["score_total"]
+    evidence = comparison["evidence"]
+    lines = [
+        "# 公司研究复评 — Standard 公司部分",
+        "",
+        "> 复评对比由程序计算；完成仅表示通过结构检查，不代表判断已证实。旧报告与旧原文未被改写。",
+        "",
+        f"- 本次 run：{comparison['run_id']}",
+        f"- 基准 run：{comparison['baseline_run_id']}",
+        f"- 股票：{comparison['ticker']}",
+        f"- 基准 as_of：{baseline['as_of']}",
+        f"- 本次 as_of：{current['as_of']}",
+        f"- 可直接比较：{'是' if comparison['comparable'] else '否（schema 或口径不同，不计算分差）'}",
+        "",
+        "## 护城河总分",
+        "",
+        f"- 基准：{_value_or_unknown(total['baseline'])}",
+        f"- 本次：{_value_or_unknown(total['current'])}",
+        f"- 差值：{_diff_text(total['diff'])}",
+        "",
+        "## 问题状态变化",
+        "",
+    ]
+    for answer in comparison["answers"]:
+        mark = "（变化）" if answer["changed"] else ""
+        lines.append(
+            f"- {answer['question_id']}：{answer['baseline_status']} → {answer['current_status']}{mark}"
+        )
+    lines.extend(["", "## 公司门闸变化", ""])
+    for gate in comparison["gates"]:
+        mark = "（变化）" if gate["changed"] else ""
+        lines.append(
+            f"- {gate['gate_id']}：{gate['baseline_result']} → {gate['current_result']}{mark}"
+        )
+    lines.extend(["", "## 护城河评分变化", ""])
+    for moat in comparison["moats"]:
+        lines.append(
+            f"- {moat['dimension_id']}：{_value_or_unknown(moat['baseline_score'])} → "
+            f"{_value_or_unknown(moat['current_score'])}；差值 {_diff_text(moat['diff'])}"
+        )
+    lines.extend(
+        [
+            "",
+            "## 证据变化",
+            "",
+            f"- 本次新增来源：{len(evidence['new_source_ids'])} 条",
+            f"- 沿用基准来源：{len(evidence['reused_source_ids'])} 条",
+            "- 旧来源保留其首次获取时间与发布时间，不得冒充本次新取得。",
+            "",
+        ]
+    )
+    if evidence["new_sources"]:
+        lines.append("- 新增来源明细：")
+        for source in evidence["new_sources"]:
+            lines.append(
+                f"  - `{source['source_id']}`：{source['title']}（{source['kind']}；"
+                f"获取 {source['retrieved_at']}；发布 {source['published_at']}）"
+            )
+        lines.append("")
+    lines.extend(["## 变化解释", ""])
+    if comparison["review_explanations"]:
+        for explanation in comparison["review_explanations"]:
+            lines.append(
+                f"- {explanation['target_id']}（{explanation['kind']}）：{explanation['text']}"
+            )
+    else:
+        lines.append("- 本次草稿未提供 review_explanations；程序只列出结构差异。")
+    lines.extend(
+        [
+            "",
+            "## 限制",
+            "",
+            "- 旧材料作为历史保留，不改写；缺分值时差值显示“不适用”。",
+            "- 不使用价格变动解释公司分数变化。",
+            "",
+        ]
+    )
+    return "\n".join(lines)

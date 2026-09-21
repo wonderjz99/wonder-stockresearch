@@ -2,9 +2,9 @@
 
 ## 当前状态
 
-- 当前阶段：5，OpenCode + CLI 端到端研究已实现；按教学约定在此暂停。
-- 业务软件：最小 Python 包、离线 CLI、结构校验、临时渲染、持久化研究记录、来源导入/归档/片段读取、collect（富途只读行情/财务 + HKEX/SEC 公告发现）与 run_steps 账本，以及 project skill `skills/company-research/`（`opencode.json` 注册）。已完成 HK.00728 一次人工监督端到端研究。
-- 附记正文、估值、复评 compare/backup，以及直接模型 API 写作：仍未实现。
+- 当前阶段：6，手动复评、备份与维护已实现；按教学约定在此暂停。
+- 业务软件：最小 Python 包、离线 CLI、结构校验、临时渲染、持久化研究记录、来源导入/归档/片段读取、collect（富途只读行情/财务 + HKEX/SEC 公告发现）与 run_steps 账本、project skill `skills/company-research/`（`opencode.json` 注册），以及复评 `compare`、`backup` 与有 baseline 时 `finish` 生成 `review.md`。已完成 HK.00728 首次研究及一次复评与备份/恢复 smoke。
+- 附记正文、估值，以及阶段 7 的 DeepSeek 直接模型写作：仍未实现（后者为本版本必做）。
 
 ## 已准备的交接文件
 
@@ -12,7 +12,28 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 ## 下一步（用户确认后继续）
 
-实施 PLAN 的阶段 6：手动复评、备份与维护。实现 `start --baseline`、`compare`、`backup`，用 Python 计算字段/数值差异，`finish` 有 baseline 时生成 `review.md`，用 SQLite backup API + 原文/报告拷贝做一致性备份。先核对阶段 5 代码、skill 与测试；不要提前实现估值、附记正文、MCP、LangGraph 或直接模型 API。
+实施 PLAN 的阶段 7（本版本必做）：新增小型 Python writer，从指定 run 的已归档来源构造受限上下文，调用 DeepSeek 生成既有 `ResearchDraft`；新增 `write-draft RUN_ID --provider deepseek [--model MODEL]`，只保存草稿并调用既有 `validate`，不自动 `finish`。凭据只从环境变量 `DEEPSEEK_API_KEY` 读取，不写入项目/日志/数据库/对话。先核对阶段 6 代码与测试；不要提前实现估值、附记正文、MCP 或 LangGraph。真实 API smoke 在用户准备好环境后单独进行。
+
+## 阶段 6 记录
+
+阶段：6，手动复评、备份与维护。
+
+完成日期：2026-09-21。
+
+新增/修改文件：`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/reports.py`、`src/wonder_stockresearch/cli.py`、`tests/test_review_and_backup.py`、`docs/06-review-and-maintenance.md`、`README.md`、`PLAN.md`、`docs/technical-spec.md` 和本文件。
+
+实际运行命令与结果：
+
+- `uv run pytest -q`：56 passed（阶段 1–5 的 47 个测试保持通过，新增 6 个阶段 6 测试与 3 个 as_of 可用性收口测试）。
+- `uv run ruff check .`：All checks passed!。
+- `uv run wonder-research --help`：退出码 0，新增 `compare`、`backup`。
+- 复核修复的核心证据 as_of 可用性：provider 现在必须同时满足 `metadata.observed_at` 存在且可解析、不晚于 `draft.as_of`、且 `observed_after_as_of` 不为 true；只有日期的 primary 以当地日终为保守可用时点。未知/晚于 as_of/缺 observed_at 的来源仅作 context，仍归档保留。
+- 真实 CLI smoke（项目根，基线为阶段 5 的 HK.00728 completed run `2d441bba…`）：`start HK.00728 --baseline` → `save-draft`（source_count=7，issues=[]）→ `validate`（exit 0）→ `compare`（comparable=true、score_total.diff=null、changes 全 0、new_sources=[]、reused=7）→ `finish`（artifacts=[company.md, research.json, review.md]）→ `review.md` 显示“差值：不适用”。
+- 备份 smoke：`backup --output data/backups/stage6-smoke` → file_count=19、missing=[]、manifest_sha256=4824850d…；恢复演练复制 19 个文件到临时根后 `history` 可读、`finish` 核对 completed 产物哈希（含 review.md）通过、`source-read` 可读原文。
+
+与计划的差异及原因：无产品范围差异。工程默认值并记录：`compare` 对任一侧 null 的分值输出 null（不适用）；备份只复制已归档来源（`data/stocks/`）与 completed run 产物，元数据型教学来源不计入 missing；CLI 新增捕获 `storage.StorageError`（锁超时 exit 1）。复核提出的两处 as_of 可用性缺口均在 `_is_core_eligible` 收口：provider 不再只信任预计算的 `observed_after_as_of`，而是直接比较 `metadata.observed_at` 与 `draft.as_of`；`publication_precision=date` 按当地日终保守判断。
+
+已知限制：复评变化解释文字来自草稿 `review_explanations`（本阶段无模型生成，留空时 review.md 明确标注）；备份为本地一致快照，无云同步/增量/加密；未实现估值、附记正文、MCP/LangGraph/DeepSeek。
 
 ## 阶段 5 记录
 
@@ -127,6 +148,8 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - 2026-09-20：阶段 4 真实接入边界——富途只用 `OpenQuoteContext` 的行情/财务接口，不导入账户/交易接口；OpenD 主机端口由环境变量配置。SEC 需 `WONDER_SEC_USER_AGENT`，未配置时该通道 blocked，不影响 HKEX。provider 数据保留 `period/currency/accounting_standards/field/endpoint` 与 `observed_at`，futu 未给单位时不推断。
 - 2026-09-20：核心证据 as_of 可用性——未知发布日期的 primary 只作 context；`published_at` 晚于 `draft.as_of` 或 provider `metadata.observed_after_as_of=true` 都不能支撑核心结论，覆盖 answered 问题、pass/fail 门闸与非 null 评分；资料仍归档不删除。另：save-draft 合并 run 已挂来源，供宿主引用采集来源。
 - 2026-09-20：阶段 5 宿主接入——project skill 唯一正文在 `skills/company-research/SKILL.md`，由 `opencode.json` 的 `skills.paths` 注册；OpenCode 只作操作员，不接 MCP/模型 SDK，研究事实以 SQLite 与 data/ 为准。
+- 2026-09-21：发布范围调整——阶段 7 的 Python 直接 DeepSeek writer 成为本版本必做交付；它只基于已归档材料生成并校验草稿，必须由用户显式 `finish`，不得自动检索或自动定稿。LangGraph 顺延为阶段 8 之后、满足门槛才评估的可选编排。
+- 2026-09-21：阶段 6 复评/备份语义——`compare` 对任一侧 null 的分值输出 null（差值“不适用”），schema/口径不同则 `comparable=false` 不算分差；本次新增来源与沿用基准来源按 run_sources 集合差分列，旧来源保留原始时间；`finish` 有 baseline 时写 `review.md` 并纳入哈希；`backup` 在项目写锁内用 SQLite backup API + 文件拷贝，输出 manifest 与 RESTORE 说明，不覆盖已有备份。
 
 ## 阶段记录模板
 
@@ -149,6 +172,6 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - 人工复核了公司/估值分离、CLI 优先、每阶段暂停、来源时间边界以及完成重试语义。明确补充了晚取得 provider 数据不能冒充 as_of 当时数据的处理。
 - 这些检查只验证交接文件的结构与一致性，不代表代码、接口或研究效果已通过测试。
 
-## 补充交接：后续 LLM API 写作
+## 补充交接：阶段 7 的 DeepSeek API 写作
 
-用户补充希望首版后能够直接接 DeepSeek 等模型 API 写报告。已同步 AGENTS.md、README.md、PLAN.md 和技术规格第 8 节。保持首版 CLI/OpenCode 方案与阶段顺序；后续 API 写作复用 ResearchDraft、证据、校验和渲染服务，不依赖旧会话，不提前开发 Agent 循环。当前没有安装 SDK、调用模型或读取凭据。
+用户确认本版本在阶段 6 后必须能够直接接 DeepSeek API 写报告。已同步 README.md、PLAN.md、技术规格第 8 节和本文件：阶段 7 复用 ResearchDraft、证据、校验和渲染服务，不依赖旧会话，也不提前开发 Agent 循环。当前没有安装 SDK、调用模型或读取凭据。

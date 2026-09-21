@@ -90,8 +90,8 @@ G4（价格合理性）也属于估值。首版报告结尾只标“估值部分
 “支持”还要求来源在 as_of 时点可用（核心证据的 as_of 可用性）：
 
 1. 发布日期未知的 primary 来源只能作 `context`，不能独立支撑核心结论。
-2. `published_at` 晚于 `draft.as_of` 的来源不能支撑核心结论。
-3. provider 来源若 `metadata.observed_after_as_of=true`，不能支撑核心结论。
+2. `published_at` 晚于 `draft.as_of` 的来源不能支撑核心结论；只有发布日期（无时分秒）的 primary 以当地日终为保守可用时点，`as_of` 早于该日终时不可用。
+3. provider 来源必须同时满足：`metadata.observed_at` 存在且可解析、`observed_at` 不晚于 `draft.as_of`、且 `metadata.observed_after_as_of` 不为 true；否则只能作 `context`，不能支撑核心结论。
 
 该规则适用于 answered 问题、pass/fail 门闸与非 null 护城河评分：存在不可用权威引用时报 `ineligible_as_of_support`，完全没有权威引用时报 `missing_authoritative_support`。资料照常归档、不删除；不足时把结论降级为 partial/missing、insufficient 或 null。
 

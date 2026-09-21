@@ -78,9 +78,58 @@ def test_provider_without_late_observation_flag_is_accepted() -> None:
         source["kind"] = "provider"
         source["published_at"] = None
         source["publication_precision"] = "unknown"
-        source["metadata"] = {"observed_after_as_of": False}
+        source["metadata"] = {
+            "observed_after_as_of": False,
+            "observed_at": "2026-09-01T00:00:00+00:00",
+        }
 
     assert validate_packet(packet_with_primary(mutate)) == []
+
+
+def test_provider_observed_at_after_as_of_cannot_support() -> None:
+    """Trusting only the observed_after_as_of flag and ignoring observed_at must fail here."""
+
+    def mutate(source: dict[str, object]) -> None:
+        source["kind"] = "provider"
+        source["published_at"] = None
+        source["publication_precision"] = "unknown"
+        source["metadata"] = {
+            "observed_after_as_of": False,
+            "observed_at": "2026-09-20T00:00:00+00:00",
+        }
+
+    codes = {issue.code for issue in validate_packet(packet_with_primary(mutate))}
+
+    assert "ineligible_as_of_support" in codes
+
+
+def test_provider_without_observed_at_cannot_support() -> None:
+    """Letting a provider source with no observation time support core claims must fail here."""
+
+    def mutate(source: dict[str, object]) -> None:
+        source["kind"] = "provider"
+        source["published_at"] = None
+        source["publication_precision"] = "unknown"
+        source["metadata"] = {}
+
+    codes = {issue.code for issue in validate_packet(packet_with_primary(mutate))}
+
+    assert "ineligible_as_of_support" in codes
+
+
+def test_date_only_primary_uses_local_end_of_day() -> None:
+    """Treating a date-only publication as available before day end must fail this test."""
+    data = copy_synthetic_packet()
+    data["sources"][0]["published_at"] = "2026-09-10T00:00:00+00:00"
+    data["sources"][0]["publication_precision"] = "date"
+    data["draft"]["as_of"] = "2026-09-10T12:00:00+00:00"
+
+    same_day = validate_packet(ResearchPacket.model_validate(data))
+    assert "ineligible_as_of_support" in {issue.code for issue in same_day}
+
+    data["draft"]["as_of"] = "2026-09-11T00:00:00+00:00"
+    next_day = validate_packet(ResearchPacket.model_validate(data))
+    assert next_day == []
 
 
 def test_future_primary_is_both_future_source_and_ineligible_support() -> None:

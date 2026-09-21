@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import research
+from . import research, storage
 from .models import ResearchPacket, SourceRequest
 from .reports import render_company
 from .research import ResearchError, ValidationIssue, validate_packet
@@ -152,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     collect = subparsers.add_parser("collect", help="采集行情/财务/公告")
     collect.add_argument("run_id")
     collect.add_argument("--kind", choices=["all", "market", "filings"], default="all")
+    compare = subparsers.add_parser("compare", help="与 baseline 比较结构化差异")
+    compare.add_argument("run_id")
+    backup = subparsers.add_parser("backup", help="备份数据库、来源与完成报告")
+    backup.add_argument("--output", required=True, help="root/data/backups/ 下的新目录")
     return parser
 
 
@@ -219,6 +223,12 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         succeeded = int(data.get("succeeded", 0)) > 0
         _emit(succeeded, data, _validation_payload(issues))
         return 0 if succeeded else 1
+    if args.command == "compare":
+        _emit(True, research.compare_runs(root, args.run_id), [])
+        return 0
+    if args.command == "backup":
+        _emit(True, research.backup(root, args.output), [])
+        return 0
     raise CommandError("unknown_command", f"未实现的命令：{args.command}", 2)
 
 
@@ -249,6 +259,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CommandError as error:
         _emit(False, {}, [_error_issue(error.code, "command", error.message)])
         return error.exit_code
+    except storage.StorageError as error:
+        _emit(False, {}, [_error_issue(error.code, "storage", error.message)])
+        return 1
     except SourceError as error:
         _emit(False, {}, [_error_issue(error.code, "source", error.message)])
         return error.exit_code
