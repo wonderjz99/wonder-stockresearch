@@ -7,6 +7,7 @@ InteractiveReport；只有用户明确调用 memo-save 才会产生公司 Memo�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, TypeVar
@@ -14,7 +15,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from . import envfile, progress, research, skill_registry, storage, writer
+from . import analysis_workspace, envfile, progress, research, skill_registry, storage, writer
 from .models import (
     AgentDecision,
     CompanyMemo,
@@ -63,6 +64,29 @@ class MemoReadArgs(StrictModel):
     memo_id: UUID
 
 
+class FinancialQueryArgs(StrictModel):
+    query: str = ""
+    max_records: int = 80
+
+
+class TrustedCalculationArgs(StrictModel):
+    metric: str
+
+
+class AnalysisDatasetArgs(StrictModel):
+    query: str = ""
+    max_records: int = 120
+
+
+class AnalysisCodeArgs(StrictModel):
+    analysis_id: UUID
+    code: str
+
+
+class AnalysisResultArgs(StrictModel):
+    analysis_id: UUID
+
+
 TOOL_ARGS: dict[str, type[BaseModel]] = {
     "get_run_status": EmptyArgs,
     "list_sources": EmptyArgs,
@@ -71,6 +95,11 @@ TOOL_ARGS: dict[str, type[BaseModel]] = {
     "read_report": EmptyArgs,
     "list_memos": EmptyArgs,
     "read_memo": MemoReadArgs,
+    "query_archived_financials": FinancialQueryArgs,
+    "run_trusted_calculation": TrustedCalculationArgs,
+    "create_analysis_dataset": AnalysisDatasetArgs,
+    "run_analysis_code": AnalysisCodeArgs,
+    "read_analysis_result": AnalysisResultArgs,
 }
 
 TOOL_DESCRIPTIONS = {
@@ -81,6 +110,11 @@ TOOL_DESCRIPTIONS = {
     "read_report": "读取当前 run 已完成的正式 company.md，不能修改它。",
     "list_memos": "列出该公司的长期 Memo。",
     "read_memo": "读取一条已经由用户明确保存的公司 Memo。",
+    "query_archived_financials": "检索当前公司已归档的富途/官方结构化财务数值和真实来源定位。",
+    "run_trusted_calculation": "运行 Python 固定计算：net_profit_yoy_growth、roe_series、capex_to_revenue 或 cash_capex_proxy。",
+    "create_analysis_dataset": "从已归档财务数值导出最小只读 JSON 数据集，供一次受限临时计算使用。",
+    "run_analysis_code": "只在已创建的数据集上执行受限 Python AST 子集；不能访问网络、环境变量、SQLite 或项目文件。",
+    "read_analysis_result": "读取某次已审计临时计算的结果和来源引用。",
 }
 
 FOCUS_INSTRUCTIONS = {
@@ -185,6 +219,224 @@ def _compact(value: object, limit: int = DEFAULT_MAX_RESULT_CHARS) -> str:
     return text[:limit] + "…（结果已截断）"
 
 
+def _hash_json(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _scratchpad_view(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "revision": row["revision"],
+        "objective": row["objective"],
+        "plan": json.loads(row["plan_json"]),
+        "observations": json.loads(row["observations_json"]),
+        "calculation_refs": json.loads(row["calculation_refs_json"]),
+        "source_refs": json.loads(row["source_refs_json"]),
+        "open_questions": json.loads(row["open_questions_json"]),
+        "compression_count": row["compression_count"],
+    }
+
+
+def _save_scratchpad(
+    root: Path,
+    session_id: str,
+    *,
+    objective: str,
+    plan: list[str],
+    observations: list[dict[str, Any]],
+    calculation_refs: list[dict[str, Any]],
+    source_refs: list[dict[str, Any]],
+    open_questions: list[str],
+    compression_count: int,
+) -> dict[str, Any]:
+    body = {
+        "objective": objective,
+        "plan": plan[:6],
+        "observations": observations[-12:],
+        "calculation_refs": calculation_refs[-12:],
+        "source_refs": source_refs[-24:],
+        "open_questions": open_questions[-8:],
+        "compression_count": compression_count,
+    }
+    with storage.project_lock(root), storage.open_db(root) as connection:
+        previous = storage.get_agent_scratchpad(connection, session_id)
+        revision = int(previous["revision"]) + 1 if previous else 1
+        storage.upsert_agent_scratchpad(
+            connection,
+            session_id=session_id,
+            revision=revision,
+            objective=objective[:12000],
+            plan_json=json.dumps(body["plan"], ensure_ascii=False),
+            observations_json=json.dumps(body["observations"], ensure_ascii=False),
+            calculation_refs_json=json.dumps(body["calculation_refs"], ensure_ascii=False),
+            source_refs_json=json.dumps(body["source_refs"], ensure_ascii=False),
+            open_questions_json=json.dumps(body["open_questions"], ensure_ascii=False),
+            content_hash=_hash_json(body),
+            compression_count=compression_count,
+            updated_at=storage.now_utc(),
+        )
+    return {"revision": revision, **body}
+
+
+def _ensure_scratchpad(root: Path, session_id: str, objective: str) -> dict[str, Any]:
+    with storage.open_db(root) as connection:
+        previous = storage.get_agent_scratchpad(connection, session_id)
+    view = _scratchpad_view(previous)
+    if view is not None:
+        return view
+    return _save_scratchpad(
+        root,
+        session_id,
+        objective=objective,
+        plan=["读取已归档资料", "优先使用可信固定计算", "核对期间、口径和来源后回答"],
+        observations=[],
+        calculation_refs=[],
+        source_refs=[],
+        open_questions=[objective],
+        compression_count=0,
+    )
+
+
+def _refs_in(value: object) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        source_id = value.get("source_id")
+        locator = value.get("locator")
+        if source_id and locator:
+            found.append({"source_id": str(source_id), "locator": str(locator)})
+        for child in value.values():
+            found.extend(_refs_in(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_refs_in(child))
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in found:
+        unique[(item["source_id"], item["locator"])] = item
+    return list(unique.values())
+
+
+def _record_tool_observation(
+    root: Path, session_id: str, objective: str, tool: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    current = _ensure_scratchpad(root, session_id, objective)
+    observations = list(current["observations"])
+    observations.append({"tool": tool, "summary": _compact(result, 1400)})
+    source_refs = [*current["source_refs"], *_refs_in(result)]
+    unique_refs = {(item["source_id"], item["locator"]): item for item in source_refs if "source_id" in item and "locator" in item}
+    calculation_refs = list(current["calculation_refs"])
+    if tool == "run_trusted_calculation" and isinstance(result.get("calculation"), dict):
+        calculation = result["calculation"]
+        calculation_refs.append({"metric": calculation.get("metric"), "version": calculation.get("version")})
+    if tool in {"run_analysis_code", "read_analysis_result"}:
+        calculation_refs.append({"analysis_id": result.get("analysis_id"), "status": result.get("status")})
+    return _save_scratchpad(
+        root,
+        session_id,
+        objective=objective,
+        plan=list(current["plan"]),
+        observations=observations,
+        calculation_refs=calculation_refs,
+        source_refs=list(unique_refs.values()),
+        open_questions=list(current["open_questions"]),
+        compression_count=int(current["compression_count"]),
+    )
+
+
+def _complete_scratchpad(root: Path, session_id: str, objective: str) -> None:
+    current = _ensure_scratchpad(root, session_id, objective)
+    _save_scratchpad(
+        root,
+        session_id,
+        objective=objective,
+        plan=list(current["plan"]),
+        observations=[*current["observations"], {"event": "interactive_report_completed"}],
+        calculation_refs=list(current["calculation_refs"]),
+        source_refs=list(current["source_refs"]),
+        open_questions=[],
+        compression_count=int(current["compression_count"]),
+    )
+
+
+def _compress_messages(
+    root: Path, session_id: str, objective: str, messages: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """在上下文预算的 70% 处使用结构化工作记忆替换旧工具文本，完整轨迹仍在 SQLite。"""
+    if sum(len(message["content"]) for message in messages) < int(MAX_CONTEXT_CHARS * 0.7):
+        return messages
+    current = _ensure_scratchpad(root, session_id, objective)
+    compressed = _save_scratchpad(
+        root,
+        session_id,
+        objective=objective,
+        plan=list(current["plan"]),
+        observations=list(current["observations"]),
+        calculation_refs=list(current["calculation_refs"]),
+        source_refs=list(current["source_refs"]),
+        open_questions=list(current["open_questions"]),
+        compression_count=int(current["compression_count"]) + 1,
+    )
+    return [
+        messages[0],
+        {
+            "role": "user",
+            "content": (
+                f"原问题：{objective}\n"
+                f"这是已验证的结构化工作记忆（第 {compressed['compression_count']} 次压缩）："
+                f"{json.dumps(compressed, ensure_ascii=False)}\n"
+                "继续调用受控工具或给出 final；不要把 provisional episode 当作原始证据。"
+            ),
+        },
+    ]
+
+
+def _sync_long_memory(root: Path, ticker: str) -> None:
+    """只从已完成报告和用户明确保存的 Memo 确定性写入可信长期记忆。"""
+    with storage.project_lock(root), storage.open_db(root) as connection:
+        for memo in storage.list_company_memos(connection, ticker):
+            storage.upsert_memory_entry(
+                connection,
+                entry_id=f"memo:{memo['id']}",
+                ticker=ticker,
+                memory_type="memo",
+                status="trusted",
+                topic=str(memo["title"]),
+                as_of=None,
+                content=str(memo["content"]),
+                source_refs_json=str(memo["source_refs_json"]),
+                origin_ref=f"company_memo:{memo['id']}",
+                content_hash=hashlib.sha256(str(memo["content"]).encode("utf-8")).hexdigest(),
+                created_at=storage.parse_iso(str(memo["updated_at"])),
+            )
+        for run in storage.list_runs(connection, ticker):
+            if run["status"] != "completed":
+                continue
+            directory = storage.run_dir(root, ticker, storage.parse_iso(str(run["created_at"])), str(run["id"]))
+            report_path = directory / "company.md"
+            if not report_path.is_file():
+                continue
+            content = report_path.read_text(encoding="utf-8")[:30000]
+            source_refs = [
+                {"source_id": item["id"], "locator": "formal_report_source", "relation": "context"}
+                for item in storage.get_run_sources(connection, str(run["id"]))
+            ]
+            storage.upsert_memory_entry(
+                connection,
+                entry_id=f"formal_report:{run['id']}",
+                ticker=ticker,
+                memory_type="formal_report",
+                status="trusted",
+                topic=f"正式公司研究 {run['id']}",
+                as_of=str(run["as_of"]),
+                content=content,
+                source_refs_json=json.dumps(source_refs, ensure_ascii=False),
+                origin_ref=f"research_run:{run['id']}",
+                content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                created_at=storage.parse_iso(str(run["completed_at"] or run["updated_at"])),
+            )
+
+
 def _run_directory(root: Path, run: dict[str, Any]) -> Path:
     return storage.run_dir(
         root,
@@ -268,6 +520,28 @@ def _execute_tool(root: Path, row: dict[str, Any], tool: str, arguments: object)
             return {"run_id": run_id, "path": storage.relative_path(root, path), "text": text[:20000]}
         if tool == "list_memos":
             return {"ticker": ticker, "memos": [_memo_summary(item) for item in storage.list_company_memos(connection, ticker)]}
+        if tool == "query_archived_financials":
+            args = parsed  # type: ignore[assignment]
+            assert isinstance(args, FinancialQueryArgs)
+            return analysis_workspace.archived_financials(
+                root, row, args.query, limit=args.max_records
+            )
+        if tool == "run_trusted_calculation":
+            args = parsed  # type: ignore[assignment]
+            assert isinstance(args, TrustedCalculationArgs)
+            return analysis_workspace.trusted_calculation(root, row, args.metric)
+        if tool == "create_analysis_dataset":
+            args = parsed  # type: ignore[assignment]
+            assert isinstance(args, AnalysisDatasetArgs)
+            return analysis_workspace.create_dataset(root, row, args.query, limit=args.max_records)
+        if tool == "run_analysis_code":
+            args = parsed  # type: ignore[assignment]
+            assert isinstance(args, AnalysisCodeArgs)
+            return analysis_workspace.run_code(root, row, str(args.analysis_id), args.code)
+        if tool == "read_analysis_result":
+            args = parsed  # type: ignore[assignment]
+            assert isinstance(args, AnalysisResultArgs)
+            return analysis_workspace.read_result(root, row, str(args.analysis_id))
         args = parsed  # type: ignore[assignment]
         assert isinstance(args, MemoReadArgs)
         memo = storage.get_company_memo(connection, str(args.memo_id))
@@ -290,9 +564,10 @@ def _tool_catalog() -> list[dict[str, Any]]:
 def _system_prompt(focus: str, skill_context: str = "") -> str:
     prompt = (
         "你是一个交互式公司研究 Agent。你回答用户的临时问题，不修改正式公司报告，"
-        "不改变评分、门闸、ResearchRun 状态，也不执行 finish。只能调用给出的只读工具。\n"
+        "不改变评分、门闸、ResearchRun 状态，也不执行 finish。只能调用给出的受控工具。\n"
         "必须遵守：不能编造 source_id、数字、发布日期或 locator；工具返回的 source_id 和 locator 才能引用；"
-        "资料不足时明确写 gaps；正式报告与 Memo 都是只读上下文。\n"
+        "资料不足时明确写 gaps；正式报告与 Memo 都是只读上下文。provisional episode 只能帮助定位，不能替代原始来源。\n"
+        "涉及数值时先调用 run_trusted_calculation；只有固定计算不足时才创建最小数据集并运行受限代码。\n"
         "每次只输出一个 JSON 对象，type 只能是 tool_call、final、ask_user。\n"
         "tool_call 格式：{\"type\":\"tool_call\",\"tool\":\"read_source\",\"arguments\":{}}。\n"
         f"当前分析焦点：{FOCUS_INSTRUCTIONS.get(focus, FOCUS_INSTRUCTIONS['general'])}\n"
@@ -311,19 +586,38 @@ def _system_prompt(focus: str, skill_context: str = "") -> str:
     return prompt
 
 
-def _initial_context(root: Path, row: dict[str, Any]) -> dict[str, Any]:
+def _memory_summary(row: dict[str, Any], *, content_limit: int | None = 2400) -> dict[str, Any]:
+    content = str(row["content"])
+    return {
+        "memory_id": row["id"],
+        "type": row["memory_type"],
+        "status": row["status"],
+        "topic": row["topic"],
+        "as_of": row["as_of"],
+        "content": content if content_limit is None else content[:content_limit],
+        "source_refs": json.loads(row["source_refs_json"]),
+    }
+
+
+def _initial_context(root: Path, row: dict[str, Any], current_question: str) -> dict[str, Any]:
     ticker = str(row["ticker"])
     run_id = str(row["run_id"]) if row.get("run_id") else None
+    _sync_long_memory(root, ticker)
     with storage.open_db(root) as connection:
         run = storage.get_run(connection, run_id) if run_id else None
         sources = [_source_summary(item) for item in _source_rows(connection, ticker, run_id)]
-        memos = [_memo_summary(item) for item in storage.list_company_memos(connection, ticker)]
+        memories = [
+            _memory_summary(item)
+            for item in storage.search_memory_entries(connection, ticker, current_question, limit=5)
+        ]
+        scratchpad = _scratchpad_view(storage.get_agent_scratchpad(connection, str(row["id"])))
     context: dict[str, Any] = {
         "ticker": ticker,
         "run_id": run_id,
         "run_status": run.get("status") if run else None,
-        "sources": sources[:40],
-        "memos": memos[:20],
+        "sources": sources[:16],
+        "relevant_memory": memories,
+        "scratchpad": scratchpad,
         "formal_report_available": bool(run and run["status"] == "completed"),
     }
     if row.get("result_json"):
@@ -420,6 +714,28 @@ def _mark_session(
                 report_json=result.model_dump_json(),
                 created_at=result.created_at,
             )
+            episode = {
+                "answer": result.answer,
+                "claims": [item.model_dump(mode="json") for item in result.claims],
+                "gaps": result.gaps,
+                "suggested_next_checks": result.suggested_next_checks,
+            }
+            storage.upsert_memory_entry(
+                connection,
+                entry_id=f"episode:{session_id}",
+                ticker=result.ticker,
+                memory_type="episode",
+                status="provisional",
+                topic=result.user_question[:500],
+                as_of=None,
+                content=json.dumps(episode, ensure_ascii=False),
+                source_refs_json=json.dumps(
+                    [item.model_dump(mode="json") for item in result.evidence_refs], ensure_ascii=False
+                ),
+                origin_ref=f"interactive_report:{session_id}",
+                content_hash=_hash_json(episode),
+                created_at=result.created_at,
+            )
 
 
 def _decision(payload: object) -> AgentDecision:
@@ -442,7 +758,14 @@ def _execute_session(
     model = str(row["model"])
     used_tokens = int(row["used_tokens"])
     initial_iteration = int(row["iteration"])
-    context = _initial_context(root, row)
+    context = _initial_context(root, row, current_question)
+    memory_ids = [
+        str(item.get("memory_id"))
+        for item in context.get("relevant_memory", [])
+        if isinstance(item, dict) and item.get("memory_id")
+    ]
+    if memory_ids:
+        _append_event(root, session_id, "memory_selection", {"memory_ids": memory_ids})
     if question.allow_network:
         error = AgentError(
             "network_not_supported",
@@ -479,6 +802,7 @@ def _execute_session(
                 f"正在进行第 {iteration}/{max_iterations} 轮分析",
                 session_id=session_id,
             )
+            messages = _compress_messages(root, session_id, current_question, messages)
             payload, consumed = _api_call_for_root(root, messages, model)
             used_tokens += consumed
             decision = _decision(payload)
@@ -523,6 +847,7 @@ def _execute_session(
                     used_tokens=used_tokens,
                     result=report,
                 )
+                _complete_scratchpad(root, session_id, current_question)
                 progress.emit(
                     on_progress,
                     "agent",
@@ -577,13 +902,17 @@ def _execute_session(
                 f"正在读取工具：{decision.tool}",
                 session_id=session_id,
             )
-            result = _execute_tool(root, row, str(decision.tool), decision.arguments)
+            try:
+                result = _execute_tool(root, row, str(decision.tool), decision.arguments)
+            except analysis_workspace.AnalysisWorkspaceError as error:
+                raise AgentError(error.code, error.message, exit_code=error.exit_code) from error
             _append_event(
                 root,
                 session_id,
                 "tool_result",
                 {"iteration": iteration, "tool": decision.tool, "result": result},
             )
+            _record_tool_observation(root, session_id, current_question, str(decision.tool), result)
             messages.append(
                 {
                     "role": "user",
@@ -680,6 +1009,7 @@ def ask(
             created_at=created_at,
         )
     _append_event(root, session_id, "question", {"question": question.question})
+    _ensure_scratchpad(root, session_id, question.question)
     if skill_audit:
         _append_event(root, session_id, "skill_selection", {"skills": skill_audit})
     try:
@@ -703,6 +1033,7 @@ def followup(
     if row["status"] == "failed":
         raise AgentError("session_failed", "失败的 session 不能继续，请重新 ask", exit_code=2)
     _append_event(root, session_id, "followup", {"question": request.question})
+    _ensure_scratchpad(root, session_id, request.question)
     return _execute_session(
         root,
         session_id,
@@ -734,6 +1065,26 @@ def get_status(root: Path, session_id: str) -> dict[str, Any]:
         result["error"] = json.loads(row["error_json"])
     with storage.open_db(root) as connection:
         result["event_count"] = len(storage.list_agent_events(connection, session_id))
+        scratchpad = _scratchpad_view(storage.get_agent_scratchpad(connection, session_id))
+        result["scratchpad"] = scratchpad
+        analysis = storage.list_analysis_runs(connection, session_id)
+        result["analysis_runs"] = [
+            {
+                "analysis_id": item["id"],
+                "execution_index": item["execution_index"],
+                "status": item["status"],
+                "dataset_hash": item["dataset_hash"],
+                "code_hash": item["code_hash"],
+                "result_summary": item["result_summary"],
+            }
+            for item in analysis
+        ]
+        result["calculation_records"] = scratchpad["calculation_refs"] if scratchpad else []
+        result["memory_used"] = [
+            event["payload_json"]
+            for event in storage.list_agent_events(connection, session_id)
+            if event["event_type"] == "memory_selection"
+        ]
     return result
 
 
@@ -774,6 +1125,7 @@ def memo_save(root: Path, session_id: str, request: MemoRequest) -> dict[str, An
             version=version,
             created_at=now,
         )
+    _sync_long_memory(root, str(row["ticker"]))
     memo = CompanyMemo(
         memo_id=UUID(memo_id),
         ticker=str(row["ticker"]),
@@ -804,3 +1156,21 @@ def memo_read(root: Path, memo_id: str) -> dict[str, Any]:
     if row is None:
         raise AgentError("unknown_memo", f"找不到 Memo：{memo_id}", exit_code=2)
     return _memo_summary(row, include_content=True)
+
+
+def memory_search(root: Path, ticker: str, query: str = "") -> dict[str, Any]:
+    ticker = research._checked_ticker(ticker)
+    storage.initialize(root)
+    _sync_long_memory(root, ticker)
+    with storage.open_db(root) as connection:
+        entries = storage.search_memory_entries(connection, ticker, query, limit=20)
+    return {"ticker": ticker, "query": query, "memories": [_memory_summary(item) for item in entries]}
+
+
+def memory_read(root: Path, entry_id: str) -> dict[str, Any]:
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        entry = storage.get_memory_entry(connection, entry_id)
+    if entry is None:
+        raise AgentError("unknown_memory", f"找不到记忆：{entry_id}", exit_code=2)
+    return _memory_summary(entry, content_limit=None)

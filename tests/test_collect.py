@@ -163,39 +163,29 @@ def test_collect_market_archives_provider_sources_and_steps(tmp_path: Path) -> N
     data, issues = research.collect(root, run_id, "market", market_provider=provider)
 
     assert issues == []
-    assert data["succeeded"] == 2 and data["failed"] == 0 and data["blocked"] == 0
+    assert data["succeeded"] == 1 and data["failed"] == 0 and data["blocked"] == 0
     assert provider.closed is True
     listed = research.list_sources(root, run_id)["sources"]
-    assert len(listed) == 2
+    assert len(listed) == 1
     assert all(source["kind"] == "provider" for source in listed)
     assert all(source["metadata"].get("observed_at") for source in listed)
     steps = research.get_status(root, run_id)["steps"]
-    assert {step["step_key"] for step in steps} == {"market_snapshot", "financial_statements"}
+    assert {step["step_key"] for step in steps} == {"market_snapshot"}
     assert {step["status"] for step in steps} == {"succeeded"}
     assert all(step["finished_at"] for step in steps)
 
 
-def test_collect_financials_preserve_period_currency_and_accounting_standard(
+def test_collect_market_does_not_duplicate_fundamentals_financial_statements(
     tmp_path: Path,
 ) -> None:
-    """Losing period/currency/accounting-standard/field/endpoint must fail this test."""
+    """标准 market collect 不能再次调用或归档已由 fundamentals 负责的财务接口。"""
     root = make_root(tmp_path)
     run_id = start(root)
 
     research.collect(root, run_id, "market", market_provider=FakeMarketProvider())
 
     listed = research.list_sources(root, run_id)["sources"]
-    financial_source = next(source for source in listed if "财务" in str(source["title"]))
-    raw = json.loads((root / str(financial_source["raw_path"])).read_text(encoding="utf-8"))
-    report = raw["statements"]["1"]["report_list"][0]
-    assert report["date_time_str"] == "2025-12-31"
-    assert report["period_text"] == "2025/FY"
-    assert report["financial_type"] == "ANNUAL"
-    assert report["currency_code"] == "CNY"
-    assert report["accounting_standards"] == "国际会计准则"
-    assert report["item_list"][0]["field_id"] == 5001
-    assert report["item_list"][0]["data"] == 529559000000.0
-    assert financial_source["metadata"]["endpoint"] == "OpenQuoteContext.get_financials_statements"
+    assert [source["metadata"].get("payload_key") for source in listed] == ["market_snapshot"]
 
 
 def test_collect_provider_failure_is_recorded_not_empty_success(tmp_path: Path) -> None:
@@ -206,7 +196,7 @@ def test_collect_provider_failure_is_recorded_not_empty_success(tmp_path: Path) 
 
     data, issues = research.collect(root, run_id, "market", market_provider=provider)
 
-    assert data["succeeded"] == 0 and data["failed"] == 2
+    assert data["succeeded"] == 0 and data["failed"] == 1
     assert {issue.code for issue in issues} == {"collect_failed"}
     assert all(issue.severity == "error" for issue in issues)
     assert research.get_status(root, run_id)["source_count"] == 0
@@ -223,7 +213,7 @@ def test_collect_blocked_provider_is_warning_not_failure(tmp_path: Path) -> None
 
     data, issues = research.collect(root, run_id, "market", market_provider=provider)
 
-    assert data["blocked"] == 2 and data["failed"] == 0
+    assert data["blocked"] == 1 and data["failed"] == 0
     assert all(issue.severity == "warning" for issue in issues)
     assert {step["status"] for step in data["steps"]} == {"blocked"}
 
@@ -363,5 +353,5 @@ def test_cli_collect_market_uses_provider_factory(
     assert main(["--root", str(root), "collect", run_id, "--kind", "market"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["data"]["succeeded"] == 2
-    assert research.get_status(root, run_id)["source_count"] == 2
+    assert payload["data"]["succeeded"] == 1
+    assert research.get_status(root, run_id)["source_count"] == 1

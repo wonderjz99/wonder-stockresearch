@@ -1,4 +1,4 @@
-# 阶段 8–10：独立交互 Agent、临时报告与公司 Memo
+# 阶段 8–10、18：独立交互 Agent、记忆、临时报告与受限计算
 
 ## 1. 目标
 
@@ -105,7 +105,7 @@ wonder-research --root <项目根> chat --text "帮我研究一下中国移动"
 
 ## 4. Agent 工具边界
 
-当前 Agent 只注册只读工具：
+Agent 的普通研究工具均为只读：
 
 - `get_run_status`
 - `list_sources`
@@ -115,7 +115,15 @@ wonder-research --root <项目根> chat --text "帮我研究一下中国移动"
 - `list_memos`
 - `read_memo`
 
-每个工具有 Pydantic 参数模型。Agent 不能调用任意 Python、SQL、shell、网络或交易接口。工具结果被截断后才重新放入上下文，调用事件保存在 `agent_events`，不保存隐藏推理、完整认证头或 API Key。
+阶段 18 另加入受控的分析工具：
+
+- `query_archived_financials`
+- `run_trusted_calculation`
+- `create_analysis_dataset`
+- `run_analysis_code`
+- `read_analysis_result`
+
+每个工具有 Pydantic 参数模型。前三个分析步骤先读取已归档数据或项目固定计算；需要临时代码时，只能对最小只读 JSON 副本执行受限 AST。代码不能 `import`、访问属性、读取文件、访问 SQLite、网络、环境变量、shell 或动态执行；每个 session 最多三次，子进程不继承 API Key，并受到十秒、256 MB、64 KB 输出限制。Agent 不能调用任意 Python、SQL、shell、网络或交易接口。工具结果被截断后才重新放入上下文，调用事件保存在 `agent_events`，不保存隐藏推理、完整认证头或 API Key。
 
 Agent 使用有限 JSON 协议：
 
@@ -146,7 +154,16 @@ schema v5 另新增：
 
 - `chat_sessions`：自然语言会话历史、待确认 RoutePlan、关联 run 和交互 Agent session。
 
+schema v8 另新增：
+
+- `agent_scratchpads`：目标、简短计划、已验证观察、计算/来源引用、待查问题、版本和压缩次数。
+- `memory_entries` 与 SQLite FTS：已完成正式报告、用户显式保存的 Memo 与标记为 `provisional` 的 InteractiveReport episode。
+- `analysis_runs`：最小数据集、代码哈希、限制、结果摘要、来源引用和工作目录的审计。
+- `source_conflicts`：富途与可比官方结构化数值的核对结果。
+
 正式研究使用 `runs`；Agent 不把临时会话伪装成 `runs`。重启后可以依靠 session ID、SQLite 和 `data/` 恢复状态，不依赖 OpenCode 私有会话数据库。
+
+Scratchpad 自动记录可检查的工作状态，不保存提示全文或隐藏推理。follow-up 只加载 Scratchpad、最近事件和最多五条同 ticker 的相关记忆；上下文接近 40,000 字符预算的 70% 时，以结构化摘要替代旧工具返回，完整轨迹仍可在 SQLite 查看。完成报告和 `memo-save` 才是长期可信记忆；临时报告 episode 只作定位线索，不能取代原始来源。
 
 ## 6. Dexter 参考边界
 
@@ -166,10 +183,12 @@ schema v5 另新增：
 
 `collect`、`write-draft`、`ask` 和 `chat` 支持简短 `ProgressEvent`。默认输出到 stderr，stdout 仍保留最终 JSON；不输出隐藏推理、密钥、完整原文或完整工具结果。
 
+`memory-search TICKER [--query TEXT]` 列出可检查的同公司记忆索引，`memory-read MEMORY_ID` 读取一条已保存的记忆，`ask-status SESSION_ID` 同时显示 Scratchpad、用过的记忆和分析执行审计。
+
 当前只有一个完整交互 Agent。自然语言 Router 是一次结构化分类调用，正式报告 Writer 是一次结构化写作调用，都不是独立的多轮 Agent。
 
 ## 8. 后续扩展
 
-反方可以继续作为当前 Agent 的开放问题；宏观、同行、产能和库存周期专用 Agent 本阶段暂不新增。下一项专业能力优先考虑同行业竞争 Agent，但需要用户先明确研究方法、比较对象和数据范围。只有真实运行证明需要独立上下文、并行执行或独立质量评估时，才拆分子 Agent。
+反方可以继续作为当前 Agent 的开放问题；宏观、同行、产能和库存周期专用 Agent 本阶段暂不新增。下一项专业能力优先考虑同行业竞争 Agent，但需要用户先明确研究方法、比较对象和数据范围。阶段 19 先接入新数据源并评估局部 OCR；阶段 20 才用同一批开放问题比较 Python loop、Pi Agent Core 和最多三名受控 worker。只有真实运行证明需要独立上下文、并行执行或独立质量评估时，才拆分子 Agent。
 
 LangGraph 不是当前依赖。只有多轮恢复、跨天状态、并行任务或审计复杂度超过现有 Python 循环时才评估；即使引入，也只能调用现有 Python 服务，不能直接改评分或执行 `finish`。

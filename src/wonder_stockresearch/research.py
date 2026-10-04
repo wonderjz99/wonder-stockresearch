@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from . import disclosures, futu_fundamentals, market, progress, sources, storage
+from . import disclosures, futu_fundamentals, market, progress, source_policy, sources, storage
 from .models import (
     GATE_IDS,
     MOAT_IDS,
@@ -122,7 +122,7 @@ def _is_core_eligible(source: Source, as_of: datetime) -> bool:
       且 observed_after_as_of 不为 true。
     - secondary / legacy：不独立支撑核心结论。
     """
-    if source.kind not in {"primary", "provider"}:
+    if source.kind not in {"primary", "provider"} or not source_policy.supports_eligible(source):
         return False
     published_at = _as_aware(source.published_at) if source.published_at is not None else None
     if published_at is not None and published_at > as_of:
@@ -511,6 +511,8 @@ def save_draft(
         except Exception:
             connection.execute("ROLLBACK")
             raise
+    # save-draft 也允许一并导入官方结构化事实；提交后重新核对，不能只在 collect/source-add 时更新。
+    _refresh_source_reconciliation(root, run_id)
     return {
         "run_id": run_id,
         "status": "draft",
@@ -526,7 +528,12 @@ def validate_run(root: Path, run_id: str) -> list[ValidationIssue]:
         if not run["draft_json"]:
             return [ValidationIssue("empty_draft", "draft", "该 run 还没有保存草稿")]
         packet = _packet_from_run(connection, run)
-        return list(validate_packet(packet)) + _archive_issues(root, packet) + _semantic_review_issues(connection, run, packet)
+        return (
+            list(validate_packet(packet))
+            + _archive_issues(root, packet)
+            + _semantic_review_issues(connection, run, packet)
+            + _reconciliation_issues(connection, run, packet.draft)
+        )
 
 
 def _semantic_review_issues(
@@ -626,7 +633,12 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
         if not run["draft_json"]:
             raise ResearchError("empty_draft", "该 run 还没有保存草稿", exit_code=2)
         packet = _packet_from_run(connection, run)
-        issues = validate_packet(packet) + _archive_issues(root, packet) + _semantic_review_issues(connection, run, packet)
+        issues = (
+            validate_packet(packet)
+            + _archive_issues(root, packet)
+            + _semantic_review_issues(connection, run, packet)
+            + _reconciliation_issues(connection, run, packet.draft)
+        )
         if issues:
             raise ResearchError(
                 "validation_failed", "草稿未通过校验，未生成正式报告", exit_code=2, issues=issues
@@ -752,6 +764,15 @@ def get_status(root: Path, run_id: str) -> dict[str, object]:
             data["quality_status"] = "draft"
             data["answer_count"] = 0
         data["source_count"] = len(storage.get_run_sources(connection, run_id))
+        reconciliation = storage.list_source_conflicts(connection, run_id)
+        data["source_reconciliation"] = {
+            "matched": sum(row["status"] == "matched" for row in reconciliation),
+            "provider_unverified": sum(row["status"] == "provider_unverified" for row in reconciliation),
+            "conflicts": sum(row["status"] == "conflict" for row in reconciliation),
+            "warning": "部分富途数值尚无同 run 官方结构化明细可核对"
+            if any(row["status"] == "provider_unverified" for row in reconciliation)
+            else None,
+        }
         data["steps"] = storage.list_steps(connection, run_id)
         write_steps = [step for step in data["steps"] if step["step_key"] == "write_draft"]  # type: ignore[index]
         if write_steps:
@@ -929,7 +950,12 @@ def _register_source(
         raw_path=raw_path,
         text_path=text_path,
         extraction_status=extraction_status,
-        metadata=metadata,
+        metadata=source_policy.normalized_metadata(
+            kind,
+            metadata,
+            extension=extension,
+            extraction_status=extraction_status,
+        ),
     )
     storage.upsert_source(connection, _source_row(source))  # type: ignore[arg-type]
     storage.link_run_source(connection, run["id"], source_id_text(source.id))  # type: ignore[arg-type]
@@ -960,6 +986,7 @@ def source_add(root: Path, run_id: str, request: SourceRequest) -> dict[str, obj
             publication_timezone=request.publication_timezone,
             content_type=acquired.content_type,
         )
+    _refresh_source_reconciliation(root, run_id)
     return {
         "source_id": source_id_text(source.id),
         "run_id": run_id,
@@ -1000,6 +1027,66 @@ def list_sources(root: Path, run_id: str) -> dict[str, object]:
         "ticker": run["ticker"],
         "sources": [_source_summary(row) for row in rows],
     }
+
+
+def _refresh_source_reconciliation(root: Path, run_id: str) -> list[dict[str, object]]:
+    """以同一 run 的官方结构化明细复核富途数值，记录而不猜测 PDF 表格。"""
+    with storage.project_lock(root), storage.open_db(root) as connection:
+        _require_run(connection, run_id)
+        sources_for_run = [
+            Source.model_validate_json(row["source_json"])
+            for row in storage.get_run_sources(connection, run_id)
+        ]
+        reconciled = source_policy.reconcile_sources(root, sources_for_run)
+        by_provider: dict[str, list[source_policy.SourceConflict]] = {}
+        for item in reconciled:
+            by_provider.setdefault(item.provider_source_id, []).append(item)
+        for source in sources_for_run:
+            values = by_provider.get(source_id_text(source.id))
+            if not values:
+                continue
+            statuses = {item.status for item in values}
+            if source_policy.ReconciliationStatus.CONFLICT in statuses:
+                status = source_policy.ReconciliationStatus.CONFLICT
+            elif statuses == {source_policy.ReconciliationStatus.MATCHED}:
+                status = source_policy.ReconciliationStatus.MATCHED
+            else:
+                status = source_policy.ReconciliationStatus.PROVIDER_UNVERIFIED
+            source.metadata["reconciliation_status"] = status.value
+            source.metadata["reconciliation_fact_count"] = len(values)
+            storage.upsert_source(connection, _source_row(source))
+        storage.replace_source_conflicts(
+            connection,
+            run_id,
+            [item.to_storage_row() for item in reconciled],
+            created_at=storage.now_utc(),
+        )
+    return [item.to_storage_row() for item in reconciled]
+
+
+def _reconciliation_issues(
+    connection: object, run: dict[str, object], draft: ResearchDraft
+) -> list[ValidationIssue]:
+    if int(run["schema_version"]) < 8:
+        return []
+    conflicts = storage.list_source_conflicts(connection, str(run["id"]))  # type: ignore[arg-type]
+    resolved_pairs = {
+        frozenset(source_id_text(source_id) for source_id in item.source_ids)
+        for item in draft.conflicts
+        if item.resolved
+    }
+    return [
+        ValidationIssue(
+            "unresolved_source_conflict",
+            f"source_conflicts[{row['id']}]",
+            f"富途与官方披露的 {row['metric']}（{row['period'] or '期间未知'}）不一致；官方值优先，未解决前不能 finish",
+        )
+        for row in conflicts
+        if row["status"] == source_policy.ReconciliationStatus.CONFLICT.value
+        and frozenset(
+            source_id for source_id in (row["provider_source_id"], row["official_source_id"]) if source_id
+        ) not in resolved_pairs
+    ]
 
 
 def _read_page(text: str, page: int) -> dict[str, object]:
@@ -1162,10 +1249,8 @@ def _collect_market(
 ) -> list[dict[str, object]]:
     run_id = str(run["id"])
     ticker = str(run["ticker"])
-    tasks = (
-        ("market_snapshot", f"{ticker} 行情快照", provider.market_snapshot),
-        ("financial_statements", f"{ticker} 财务原始数据", provider.financial_statements),
-    )
+    # 年度财务只由 fundamentals.statements 采集，避免对同一富途接口重复请求。
+    tasks = (("market_snapshot", f"{ticker} 行情快照", provider.market_snapshot),)
     results: list[dict[str, object]] = []
     for step_key, title, call in tasks:
         input_hash = _input_hash({"ticker": ticker, "step": step_key, "provider": provider.name})
@@ -1173,18 +1258,6 @@ def _collect_market(
         try:
             payload = call(ticker)
             observed_at = storage.to_iso(storage.now_utc())
-            available_from = None
-            currency = None
-            accounting_standard = None
-            if step_key == "financial_statements":
-                dates: list[object] = []
-                for block in payload.get("statements", {}).values():
-                    for row in block.get("report_list", []):
-                        dates.append(row.get("date_time_str"))
-                        if currency is None and row.get("currency_code"):
-                            currency = row.get("currency_code")
-                            accounting_standard = row.get("accounting_standards")
-                available_from = futu_fundamentals._max_date(dates)
             body = json.dumps(
                 {"provider": provider.name, "observed_at": observed_at, **payload},
                 ensure_ascii=False,
@@ -1206,10 +1279,7 @@ def _collect_market(
                     metadata={
                         "provider": provider.name,
                         "endpoint": payload.get("endpoint"),
-                        "evidence_class": "reported" if available_from else "snapshot",
-                        "available_from": available_from,
-                        "currency": currency,
-                        "accounting_standard": accounting_standard,
+                        "evidence_class": "snapshot",
                         "observed_at": observed_at,
                         "observed_after_as_of": storage.parse_iso(observed_at)
                         > storage.parse_iso(current["as_of"]),
@@ -1357,7 +1427,6 @@ FUNDAMENTAL_TASKS = (
     ("fundamentals_financials", ("statements", "operational_efficiency")),
     ("fundamentals_revenue", ("revenue_breakdown",)),
     ("fundamentals_capital", ("dividends", "buybacks")),
-    ("fundamentals_valuation", ("valuation", "consensus")),
 )
 
 
@@ -1467,14 +1536,14 @@ def collect(
     )
 
     if kind in {"all", "market"}:
-        progress.emit(on_progress, "collect.market", "started", "正在采集行情和财务数据", run_id=run_id)
+        progress.emit(on_progress, "collect.market", "started", "正在采集行情快照", run_id=run_id)
         provider = market_provider
         if provider is None:
             try:
                 provider = market.make_provider()
             except sources.SourceError as error:
                 payload = _error_payload(error)
-                for step_key in ("market_snapshot", "financial_statements"):
+                for step_key in ("market_snapshot",):
                     attempt = _begin_step(
                         root, run_id, step_key, "futu", _input_hash({"ticker": ticker, "step": step_key})
                     )
@@ -1486,7 +1555,7 @@ def collect(
                 results.extend(_collect_market(root, run, provider))
             finally:
                 provider.close()
-        progress.emit(on_progress, "collect.market", "completed", "行情和财务数据采集完成", run_id=run_id)
+        progress.emit(on_progress, "collect.market", "completed", "行情快照采集完成", run_id=run_id)
 
     if kind in {"all", "fundamentals"}:
         progress.emit(
@@ -1589,6 +1658,9 @@ def collect(
         "failed": failed,
         "blocked": blocked,
     }
+    # 公告通常在 collect 的末尾才进入 run；所有子任务完成后再做一次可复现核对。
+    if results:
+        _refresh_source_reconciliation(root, run_id)
     progress.emit(
         on_progress,
         "collect",

@@ -281,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
     memo_list.add_argument("ticker")
     memo_read = subparsers.add_parser("memo-read", help="读取公司 Memo")
     memo_read.add_argument("memo_id")
+    memory_search = subparsers.add_parser("memory-search", help="检索某公司的长期记忆和临时 episode 索引")
+    memory_search.add_argument("ticker")
+    memory_search.add_argument("--query", default="", help="按主题或指标检索；省略时返回最近记录")
+    memory_read = subparsers.add_parser("memory-read", help="读取一条长期记忆或 provisional episode")
+    memory_read.add_argument("memory_id")
     chat_cmd = subparsers.add_parser("chat", help="独立自然语言入口")
     chat_cmd.add_argument(
         "--text",
@@ -639,6 +644,12 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         return 0
     if args.command == "memo-read":
         _emit(True, agent.memo_read(root, args.memo_id), [])
+        return 0
+    if args.command == "memory-search":
+        _emit(True, agent.memory_search(root, args.ticker, args.query), [])
+        return 0
+    if args.command == "memory-read":
+        _emit(True, agent.memory_read(root, args.memory_id), [])
         return 0
     if args.command == "chat":
         return _run_chat(root, args)

@@ -4,7 +4,7 @@
 
 前三阶段的数据都由用户手动提供。这一阶段让程序自己取得两类真实资料：
 
-1. **行情与财务**（富途 OpenD，只读）——个股快照，以及最多 10 个年度期间的利润表、资产负债表、现金流量表、关键指标；主营构成尽可能归档最多 10 个年报期和最近 3 个中报期。
+1. **行情与财务**（富途 OpenD，只读）——`market` 只取得个股快照；`fundamentals` 是唯一的财务报表入口，分页归档每类最多 20 个去重年度期的利润表、资产负债表、现金流量表和关键指标；主营构成尽可能归档最多 10 个年报期和最近 3 个中报期。
 2. **公告与定期报告**（港交所 HKEXnews / 美国 SEC EDGAR 公开渠道）——默认回看 5 年，归档最近 5 份年报和最近 3 份中期/季度定期报告。
 
 同时加入一张轻量运行步骤账本 `run_steps`，给每个采集子任务记录 attempt、状态、输入哈希、输出来源、provider 和错误。它是 `runs` 的执行明细，不是事件溯源或通用任务队列。
@@ -20,7 +20,8 @@ collect RUN --kind market|filings|all
 research.collect()
     ├── 每个子任务先写 run_steps(status=running)，然后释放锁
     ├── 网络调用（不持项目写锁）
-    │     market:    market.FutuQuoteProvider → OpenD OpenQuoteContext（只读）
+    │     market:    market.FutuQuoteProvider → OpenD OpenQuoteContext（只读快照）
+    │     fundamentals: futu_fundamentals.FutuFundamentalsProvider → OpenD（财务与基本面）
     │     filings:   disclosures.Hkex/SecProvider → 官方检索接口
     │                → 选中后经 sources.fetch_url 下载
     ├── 重新取锁，登记来源（provider / primary / secondary）并写 run_steps
@@ -30,7 +31,7 @@ research.collect()
 ## 3. 实际文件与入口
 
 - `src/wonder_stockresearch/storage.py`：`SCHEMA_VERSION = 2`，新增 `run_steps` 表与 `_MIGRATIONS`（v1→v2 显式迁移），以及 `next_step_attempt`/`insert_step`/`finish_step`/`list_steps`。
-- `src/wonder_stockresearch/market.py`（新）：`FutuQuoteProvider`，惰性 import `futu`，`SysConfig.enable_console_log(False)` 防止 SDK 日志污染 stdout，先做 2 秒 TCP 端口探测再连接，只调用 `OpenQuoteContext` 的 `get_market_snapshot` 与 `get_financials_statements`，**不导入任何账户/交易接口**。
+- `src/wonder_stockresearch/market.py`：`FutuQuoteProvider`，惰性 import `futu`，`SysConfig.enable_console_log(False)` 防止 SDK 日志污染 stdout，先做 2 秒 TCP 端口探测再连接，只调用 `OpenQuoteContext` 的 `get_market_snapshot`，**不导入任何账户/交易接口**。财务报表由 `futu_fundamentals.py` 的单一路径分页请求。
 - `src/wonder_stockresearch/disclosures.py`：`HkexDisclosureProvider`（`prefix.do` 查 stockId，`titleSearchServlet.do` 取公告并保留最多 200 条相关候选）、`SecDisclosureProvider`（EDGAR submissions，需 `WONDER_SEC_USER_AGENT`）、`classify_title`/`select_filings`。当前默认回看 5 年并选取最近 5 份年报 + 3 份中期/季度报告。
 - `src/wonder_stockresearch/research.py`：抽出 `_register_source`（归档+登记，`source_add` 与 `collect` 共用）；新增 `_begin_step`/`_end_step`、`_collect_market`、`_collect_filings`、`collect`；`get_status` 增加 `steps`。
 - `src/wonder_stockresearch/cli.py`：新增 `collect RUN_ID [--kind all|market|filings]`。
@@ -61,10 +62,9 @@ uv run wonder-research --root "$DEMO" status "$RUN"
 ```text
 filings → ok=true，candidate_count=18，selected_count=4，downloaded=4
           归档：2026 INTERIM REPORT、ANNUAL REPORT 2025/2024/2023 + 公告索引
-market  → ok=true，market_snapshot 与 financial_statements 均 succeeded
+market  → ok=true，market_snapshot succeeded
           stdout 为纯 JSON（futu 日志已关闭）
-          财务：利润表/资产负债表/现金流量表 各 10 期，CNY、国际会计准则；
-                关键指标 10 期，HKD、无会计口径
+fundamentals → 财务报表经单一路径分页归档；每类最多 20 个去重年度期，保留原始期间、币种和会计准则
 snapshot→ 中国电信 00728，last_price 4.435
 source-read --page 2 → locator="page 2"，total_pages=251
 ```

@@ -2,22 +2,23 @@
 
 ## 当前状态
 
-- 当前阶段：17 Skill 按需加载已完成。富途年度字段、SQLite 页级索引、年报 Capex 输入和离线验证均已完成；中国移动、联通、电信的新草稿均已通过当前 `validate`。中国移动的 Q09 曾被新状态规则识别为 `answered_with_gap`，已通过可恢复分组重试修正并重新审查。三份均保持 draft，不会自动 `finish`。
-- 业务软件：固定研究新增六组 EvidencePack、Decimal 可信计算、staged Writer、定向修订、DraftReview、schema v6 `draft_sections`/`draft_reviews`、schema v7 `source_page_fts`、`review-draft` 和 finish 语义门闸。既有 collect、交互 Agent、Memo、chat 与历史完成报告保持兼容。
+- 当前阶段：18 开放问题 Agent、来源仲裁、记忆与受限临时计算已完成。富途年度字段、SQLite 页级索引、年报 Capex 输入和离线验证均已完成；中国移动、联通、电信的新草稿均已通过当前 `validate`。中国移动的 Q09 曾被新状态规则识别为 `answered_with_gap`，已通过可恢复分组重试修正并重新审查。三份均保持 draft，不会自动 `finish`。
+- 业务软件：固定研究新增六组 EvidencePack、Decimal 可信计算、staged Writer、定向修订、DraftReview、schema v6 `draft_sections`/`draft_reviews`、schema v7 `source_page_fts`、schema v8 来源冲突/Agent Scratchpad/记忆索引/分析审计、`review-draft` 和 finish 语义门闸。既有 collect、交互 Agent、Memo、chat 与历史完成报告保持兼容。
 - 附记正文与估值：仍未实现。真实 DeepSeek API smoke 已跑通；加入 fundamentals 后 HK.00728 草稿由“1 answered/23 partial”变为“24 answered、6/6 门闸 pass、M1–M6 均有分”。
 - writer schema 修复：已加入 `gap` Prompt 约束和一次受控结构修复；修复仍失败保持 `invalid_schema`，不保存草稿、不自动 `finish`。
 - 报告层：新完成报告使用 Q01–Q24 完整问题文本、中文标签、精确数值格式和短引用索引；TTY 完成反馈列绝对路径，非 TTY 保持 JSON。
 - Writer：默认模板为 `deepseek-staged-v5`；`deepseek-draft-v3` one-shot 仅保留回归。分组 Writer 只接收与该组相关的可信计算，模型提示不替代语义审查，最终 error 不会被自动 finish。
 - 自然语言失败反馈：`validation_failed` 在 TTY 显示问题位置、错误码、解释与 run_id；非 TTY 返回 `ok=false`、issues 和 exit 2，不会误报成功。
 - Skill：Router 仅接收 Catalog 摘要；`skill-list`、`skill-check` 和 `start --skill` 可用。方法正文/reference 只在确认后的 Writer 或交互 Agent 执行边界加载，实际加载的名称、版本、内容哈希进入 run step 或 Agent event，正文不落库。
+- 开放问题：既有 Python Agent loop 新增已归档财务检索、可信固定计算、只读临时数据集、受限分析代码与结果读取。Scratchpad 自动保存可检查的工作状态；长期可信记忆只来自 completed 报告和 `memo-save`，临时报告只作为 provisional episode 索引。
 
 ## 已准备的交接文件
 
-README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md、docs/teaching-contract.md、docs/provenance.md、docs/09-agent-layer.md、skills/company-analysis-method/、skills/interactive-research-agent/ 和本文件。
+README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md、docs/teaching-contract.md、docs/provenance.md、docs/09-agent-layer.md、docs/15-open-question-agent.md、skills/company-analysis-method/、skills/interactive-research-agent/、skills/analysis-workspace/ 和本文件。
 
-## 下一步（阶段 18 前暂停）
+## 下一步（阶段 19 前暂停）
 
-用户可查看中国移动 `fe6ecce2…`、中国联通 `e491dee8…` 和中国电信 `e5d20c8…` 的新草稿及结构化审查。重点核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23 的问题对齐、当期口径和原文 locator；所有 run 仍保持 draft，只有用户决定后才能 `finish`。下一阶段是开放问题的受限 `AnalysisWorkspace`：优先复用可信固定计算，只有现有 capability 不能回答时才允许临时代码；Pi Agent Core 评估仍在阶段 20，当前不迁移技术栈、不引入 LangGraph。
+用户可查看中国移动 `fe6ecce2…`、中国联通 `e491dee8…` 和中国电信 `e5d20c8…` 的新草稿及结构化审查。重点核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23 的问题对齐、当期口径和原文 locator；所有 run 仍保持 draft，只有用户决定后才能 `finish`。下一阶段先补 SEC XBRL、专题数据源和局部 PDF/OCR 基准；Pi Agent Core、多 Agent 与强隔离 runtime 都保留到阶段 20 的同题基准评估，当前不迁移技术栈、不引入 LangGraph。
 
 ## 阶段 16.1 记录
 
@@ -67,7 +68,32 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。
 - 尚未调用真实 DeepSeek，也没有新建真实 ResearchRun 或执行 finish；三家电信 draft 及已完成历史报告未改动。
 
-已知限制：阶段 17 不提供临时代码、shell、网络或新数据能力。`analysis_workspace` 仅注册为未来 capability；阶段 18 才实现只读数据导出、临时目录、资源上限、代码/输入哈希和结果审计。
+已知限制：本条记录反映阶段 17 完成当时的边界。阶段 18 已启用 `analysis_workspace`，但仍不提供 shell、网络、真实 SQLite 写入或新的外部数据能力。
+
+## 阶段 18 记录
+
+阶段：18，固定研究数据优化、开放问题 Agent 工作记忆与受限临时计算。
+
+完成日期：2026-10-04。
+
+实现内容：
+
+- 新增 `source_policy.py`：分离“获取顺序”和“证据权威顺序”，为每个来源和 EvidenceChunk 保存 `source_rank`、`extraction_method`、`supports_eligible`、`reconciliation_status`。EvidencePack 的稳定排序改为可用性、题目匹配、权威、结构化程度、期间匹配和 locator；搜索发现记录无法成为核心 supports。
+- `futu_fundamentals.statements` 成为唯一财务报表采集路径。财务接口按 `next_key`、每页 50 条分页，每类报表去重后最多保留 20 个年度期。`market` 仅采集行情快照，standard `collect` 不再请求 valuation/consensus。
+- 同一 run 出现富途与官方结构化数值时，程序按字段、期间、币种记录 `matched`、`provider_unverified` 或 `conflict`。官方披露优先；未在 ResearchDraft `conflicts` 中以两个 source_id、说明和 `resolved=true` 明确处理的冲突会使 `validate`/`finish` 返回 `unresolved_source_conflict`。
+- schema v8 新增 `source_conflicts`、`agent_scratchpads`、FTS `memory_entries` 与 `analysis_runs`。follow-up 加载 Scratchpad、最近事件和最多五条相关记忆；达到上下文预算 70% 时以可检查的结构化摘要压缩，完整 events 仍保留。completed report 与 `memo-save` 才写可信长期记忆；InteractiveReport 只写 `provisional` episode。
+- 新增 `AnalysisWorkspace`、`analysis_workspace` capability 和同名 Skill。优先通过 `run_trusted_calculation` 回答；必要时导出最小只读 JSON，执行受限 Python AST，禁止 import、属性、动态执行、文件、SQLite、网络、shell 和环境变量访问。子进程默认无 API Key，限制十秒、256 MB、64 KB 输出和每 session 三次执行，并保存输入/代码哈希、来源和结果摘要。
+- 新增 `memory-search`、`memory-read`；`ask-status` 返回 Scratchpad、实际使用的记忆、可信计算和分析执行审计。同步更新 README、研究规格、技术规格、富途能力说明、Agent 层、计划与 [docs/15-open-question-agent.md](docs/15-open-question-agent.md)。
+
+验证：
+
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：149 passed（2026-10-04）。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。`git diff --check`：通过。
+- 对已有三份 draft 执行只读 `validate`：中国移动 `fe6ecce2…`、中国联通 `e491dee8…`、中国电信 `e5d20c8…` 均返回 valid。直接从其归档来源重算：三家净利润同比各有 9 个相邻年度观察、ROE 各覆盖 10 年、Capex/收入各覆盖 5 年；没有调用 DeepSeek、OpenD、`write-draft` 或 `finish`。
+- `skill-check analysis-workspace`：能力 Skill 通过 Catalog、依赖和 Capability Registry 检查，显示 `available=true`；没有加载未选择 Skill 的正文或调用模型。
+- 新增离线覆盖：富途财务分页/去重与唯一调用路径、standard collect 不采集估值、EvidencePack 稳定排序与搜索发现不可做 supports、官方数值匹配/缺失/冲突、冲突阻止 validate、Scratchpad 恢复/压缩、FTS 记忆隔离与 provisional 边界、固定计算优先、分析 AST 越权拒绝、资源审计与每 session 次数上限、schema v7→v8 迁移。
+
+已知限制：本次没有调用真实 DeepSeek/OpenD，也没有新建或 finish 三家电信公司的正式 run。已完成现有归档的固定计算与 validate 回归；后续真实 Agent 验收仍应分别检查中国移动净利润增长/ROE、三家公司 Capex/收入、联通和电信的债务现金流与分红差异，并记录引用完整率、模型调用、恢复和分析审计。OCR、通用联网搜索、SEC XBRL、Pi runtime、多 Agent 与容器/E2B 不在阶段 18 范围。
 
 ## 阶段 16 记录
 

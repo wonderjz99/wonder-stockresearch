@@ -73,12 +73,12 @@ _REGISTRY: dict[str, CapabilityDefinition] = {
     ),
     "analysis_workspace": CapabilityDefinition(
         name="analysis_workspace",
-        description="阶段 18 的受限临时计算工作区；当前尚未实现。",
+        description="在已归档资料导出的最小只读数据集上执行受限临时计算，并保存来源与执行审计。",
         input_model=AnalysisWorkspaceInput,
         output_model=AnalysisWorkspaceOutput,
         permissions=("read_exported_dataset", "write_temporary_files", "run_limited_code"),
-        audit_target="analysis_workspace.audit",
-        available=False,
+        audit_target="analysis_runs",
+        available=True,
     ),
 }
 

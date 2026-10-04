@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 LOCK_TIMEOUT_SECONDS = 5.0
 STEP_STATUSES = ("pending", "running", "succeeded", "failed", "blocked", "skipped")
 
@@ -182,6 +182,97 @@ _SOURCE_PAGE_FTS_DDL = """
     )
 """
 
+# 阶段 18：交互 Agent 的工作记忆、可检查长期记忆、临时分析审计，以及来源数值核对。
+# 这些记录不保存模型提示词、隐藏推理、认证信息或完整工具结果。
+_AGENT_MEMORY_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_scratchpads (
+        session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
+        revision INTEGER NOT NULL,
+        objective TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        observations_json TEXT NOT NULL,
+        calculation_refs_json TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        open_questions_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        compression_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_entries (
+        id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL REFERENCES stocks(ticker),
+        memory_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        as_of TEXT,
+        content TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        origin_ref TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS memory_entries_ticker_created
+        ON memory_entries(ticker, created_at DESC)
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_entry_fts USING fts5(
+        entry_id UNINDEXED,
+        ticker UNINDEXED,
+        topic,
+        content,
+        tokenize = 'unicode61'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS analysis_runs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+        ticker TEXT NOT NULL REFERENCES stocks(ticker),
+        execution_index INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        dataset_hash TEXT NOT NULL,
+        code_hash TEXT,
+        limits_json TEXT NOT NULL,
+        result_json TEXT,
+        result_summary TEXT,
+        source_refs_json TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        finished_at TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS analysis_runs_session_created
+        ON analysis_runs(session_id, created_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS source_conflicts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        provider_source_id TEXT NOT NULL REFERENCES sources(id),
+        official_source_id TEXT REFERENCES sources(id),
+        metric TEXT NOT NULL,
+        period TEXT,
+        currency TEXT,
+        provider_value TEXT,
+        official_value TEXT,
+        status TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS source_conflicts_run_status
+        ON source_conflicts(run_id, status)
+    """,
+)
+
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS stocks (
@@ -235,6 +326,7 @@ _SCHEMA = (
     *_CHAT_DDL,
     *_DRAFT_QUALITY_DDL,
     _SOURCE_PAGE_FTS_DDL,
+    *_AGENT_MEMORY_DDL,
 )
 
 # 显式递增迁移：键为目标版本，值为从上一版升级到该版需要执行的语句。
@@ -245,6 +337,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     5: _CHAT_DDL,
     6: _DRAFT_QUALITY_DDL,
     7: (_SOURCE_PAGE_FTS_DDL,),
+    8: _AGENT_MEMORY_DDL,
 }
 
 
@@ -1116,6 +1209,270 @@ def list_company_memos(connection: sqlite3.Connection, ticker: str) -> list[dict
 def get_company_memo(connection: sqlite3.Connection, memo_id: str) -> dict[str, Any] | None:
     row = connection.execute("SELECT * FROM company_memos WHERE id = ?", (memo_id,)).fetchone()
     return row_to_dict(row)
+
+
+def get_agent_scratchpad(connection: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT * FROM agent_scratchpads WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def upsert_agent_scratchpad(
+    connection: sqlite3.Connection,
+    *,
+    session_id: str,
+    revision: int,
+    objective: str,
+    plan_json: str,
+    observations_json: str,
+    calculation_refs_json: str,
+    source_refs_json: str,
+    open_questions_json: str,
+    content_hash: str,
+    compression_count: int,
+    updated_at: datetime,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_scratchpads(
+            session_id, revision, objective, plan_json, observations_json,
+            calculation_refs_json, source_refs_json, open_questions_json,
+            content_hash, compression_count, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            revision = excluded.revision,
+            objective = excluded.objective,
+            plan_json = excluded.plan_json,
+            observations_json = excluded.observations_json,
+            calculation_refs_json = excluded.calculation_refs_json,
+            source_refs_json = excluded.source_refs_json,
+            open_questions_json = excluded.open_questions_json,
+            content_hash = excluded.content_hash,
+            compression_count = excluded.compression_count,
+            updated_at = excluded.updated_at
+        """,
+        (
+            session_id,
+            revision,
+            objective,
+            plan_json,
+            observations_json,
+            calculation_refs_json,
+            source_refs_json,
+            open_questions_json,
+            content_hash,
+            compression_count,
+            to_iso(updated_at),
+        ),
+    )
+
+
+def upsert_memory_entry(
+    connection: sqlite3.Connection,
+    *,
+    entry_id: str,
+    ticker: str,
+    memory_type: str,
+    status: str,
+    topic: str,
+    as_of: str | None,
+    content: str,
+    source_refs_json: str,
+    origin_ref: str,
+    content_hash: str,
+    created_at: datetime,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO memory_entries(
+            id, ticker, memory_type, status, topic, as_of, content,
+            source_refs_json, origin_ref, content_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ticker = excluded.ticker,
+            memory_type = excluded.memory_type,
+            status = excluded.status,
+            topic = excluded.topic,
+            as_of = excluded.as_of,
+            content = excluded.content,
+            source_refs_json = excluded.source_refs_json,
+            origin_ref = excluded.origin_ref,
+            content_hash = excluded.content_hash,
+            updated_at = excluded.updated_at
+        """,
+        (
+            entry_id,
+            ticker,
+            memory_type,
+            status,
+            topic,
+            as_of,
+            content,
+            source_refs_json,
+            origin_ref,
+            content_hash,
+            to_iso(created_at),
+            to_iso(created_at),
+        ),
+    )
+    connection.execute("DELETE FROM memory_entry_fts WHERE entry_id = ?", (entry_id,))
+    connection.execute(
+        "INSERT INTO memory_entry_fts(entry_id, ticker, topic, content) VALUES (?, ?, ?, ?)",
+        (entry_id, ticker, topic, content),
+    )
+
+
+def get_memory_entry(connection: sqlite3.Connection, entry_id: str) -> dict[str, Any] | None:
+    row = connection.execute("SELECT * FROM memory_entries WHERE id = ?", (entry_id,)).fetchone()
+    return row_to_dict(row)
+
+
+def search_memory_entries(
+    connection: sqlite3.Connection, ticker: str, query: str, *, limit: int = 5
+) -> list[dict[str, Any]]:
+    """先用 FTS，再用同公司最近记录回退；后者保证中文分词差异不会丢失记忆。"""
+    safe_limit = max(1, min(limit, 20))
+    terms = [term.replace('"', " ").strip() for term in query.split() if term.strip()]
+    if terms:
+        match = " OR ".join(f'"{term}"' for term in terms)
+        try:
+            rows = connection.execute(
+                """
+                SELECT memory_entries.*
+                FROM memory_entry_fts
+                JOIN memory_entries ON memory_entries.id = memory_entry_fts.entry_id
+                WHERE memory_entry_fts.ticker = ? AND memory_entry_fts MATCH ?
+                ORDER BY memory_entries.updated_at DESC, memory_entries.id DESC
+                LIMIT ?
+                """,
+                (ticker, match, safe_limit),
+            ).fetchall()
+            if rows:
+                return [dict(row) for row in rows]
+        except sqlite3.OperationalError:
+            pass
+    rows = connection.execute(
+        """
+        SELECT * FROM memory_entries
+        WHERE ticker = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (ticker, safe_limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_analysis_run(
+    connection: sqlite3.Connection,
+    *,
+    analysis_id: str,
+    session_id: str,
+    ticker: str,
+    execution_index: int,
+    status: str,
+    dataset_hash: str,
+    code_hash: str | None,
+    limits_json: str,
+    source_refs_json: str,
+    workspace_path: str,
+    created_at: datetime,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO analysis_runs(
+            id, session_id, ticker, execution_index, status, dataset_hash, code_hash,
+            limits_json, result_json, result_summary, source_refs_json, workspace_path,
+            created_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)
+        """,
+        (
+            analysis_id,
+            session_id,
+            ticker,
+            execution_index,
+            status,
+            dataset_hash,
+            code_hash,
+            limits_json,
+            source_refs_json,
+            workspace_path,
+            to_iso(created_at),
+        ),
+    )
+
+
+def finish_analysis_run(
+    connection: sqlite3.Connection,
+    analysis_id: str,
+    *,
+    status: str,
+    result_json: str | None,
+    result_summary: str | None,
+    finished_at: datetime,
+) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE analysis_runs
+        SET status = ?, result_json = ?, result_summary = ?, finished_at = ?
+        WHERE id = ?
+        """,
+        (status, result_json, result_summary, to_iso(finished_at), analysis_id),
+    )
+    return cursor.rowcount
+
+
+def get_analysis_run(connection: sqlite3.Connection, analysis_id: str) -> dict[str, Any] | None:
+    row = connection.execute("SELECT * FROM analysis_runs WHERE id = ?", (analysis_id,)).fetchone()
+    return row_to_dict(row)
+
+
+def list_analysis_runs(connection: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT * FROM analysis_runs WHERE session_id = ? ORDER BY execution_index, id", (session_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def replace_source_conflicts(
+    connection: sqlite3.Connection,
+    run_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    created_at: datetime,
+) -> None:
+    connection.execute("DELETE FROM source_conflicts WHERE run_id = ?", (run_id,))
+    for row in rows:
+        connection.execute(
+            """
+            INSERT INTO source_conflicts(
+                id, run_id, provider_source_id, official_source_id, metric, period, currency,
+                provider_value, official_value, status, details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                run_id,
+                row["provider_source_id"],
+                row.get("official_source_id"),
+                row["metric"],
+                row.get("period"),
+                row.get("currency"),
+                row.get("provider_value"),
+                row.get("official_value"),
+                row["status"],
+                row["details_json"],
+                to_iso(created_at),
+            ),
+        )
+
+
+def list_source_conflicts(connection: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT * FROM source_conflicts WHERE run_id = ? ORDER BY metric, period, id", (run_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def backup_database(root: Path, destination: Path) -> None:

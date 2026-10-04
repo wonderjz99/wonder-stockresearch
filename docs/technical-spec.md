@@ -6,7 +6,7 @@
 
 包 wonder_stockresearch，入口 wonder-research = wonder_stockresearch.cli:main，兼容 python -m wonder_stockresearch。
 
-按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、market.py（富途行情/财务）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（阶段 8–10 交互 Agent 与 Memo）、capabilities.py（受控 capability 定义）、skill_registry.py（项目 Skill Catalog 与按需加载）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
+按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、source_policy.py（来源等级/核对）、market.py（富途行情）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（交互 Agent、记忆与 Memo）、analysis_workspace.py（受限临时计算）、capabilities.py（受控 capability 定义）、skill_registry.py（项目 Skill Catalog 与按需加载）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
 
 Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 为标准库。开发用 pytest、ruff；HTTP 用 requests，文字 PDF 用 pypdf。富途 SDK 阶段 4 锁定 `futu-api==10.11.7108`（实测可连接本机 OpenD 并返回快照/财务）。uv.lock 随实现维护。不在文档里承诺未经验证的 SDK 版本。
 
@@ -52,7 +52,7 @@ Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 
 - 采集器和未来 writer 使用它记录可重试边界、输入哈希、provider 错误和输出引用；`runs.draft_json` 仍是草稿的正式内容。`output_ref` 形如 `source:<uuid>`。
 - 此表通过显式 schema migration（`_MIGRATIONS` v1→v2）加入，`initialize` 对已有 v1 库执行迁移，不重建已有表。
 
-阶段 16 的 schema v6 增加 `draft_sections`（分组 input/output hash、JSON、provider/model/template）与 `draft_reviews`（draft hash、状态、reviewer 类型、模型、模板和结构化 review JSON）。新 standard run 需要 matching passing review；v5 历史 run 兼容原规则。阶段 16.1 的 schema v7 增加 FTS5 `source_page_fts`，按已归档非 Provider 来源保存 `source_id`、页/行 locator、内容和内容哈希，供确定性页级检索使用；它不保存提示词、隐藏推理或新抓取的数据。
+阶段 16 的 schema v6 增加 `draft_sections`（分组 input/output hash、JSON、provider/model/template）与 `draft_reviews`（draft hash、状态、reviewer 类型、模型、模板和结构化 review JSON）。新 standard run 需要 matching passing review；v5 历史 run 兼容原规则。阶段 16.1 的 schema v7 增加 FTS5 `source_page_fts`，按已归档非 Provider 来源保存 `source_id`、页/行 locator、内容和内容哈希，供确定性页级检索使用；它不保存提示词、隐藏推理或新抓取的数据。阶段 18 的 schema v8 增加 `agent_scratchpads`、FTS5 `memory_entry_fts`/`memory_entries`、`analysis_runs` 与 `source_conflicts`；v7 历史 completed run 不改变完成规则。
 
 foreign_keys=ON、busy_timeout=5000；首版使用默认 journal，不先开 WAL。PRAGMA user_version 管理 schema，阶段 1–3 为 1、阶段 4–6 为 2、阶段 7 为 3、阶段 8–10 为 4、阶段 11–12 为 5、阶段 16 为 6、阶段 16.1 为 7；只添加显式递增迁移，不每次启动重建表。
 
@@ -83,7 +83,7 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 - status RUN_ID / history TICKER：返回状态、质量信息、来源摘要/历史元数据，不一次吐所有原文。
 - draft-read RUN_ID / review-read RUN_ID：分别只读输出当前草稿和最新结构化审查 JSON；不调用模型、不生成报告、不改变 run。draft-preview RUN_ID：在 `data/tmp/draft-previews/<RUN_ID>/` 写入未定稿 Markdown 预览及已有的结构化审查预览，不改变 run。
 - save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources。阶段 5 起校验会把 packet 内来源与该 run 已挂来源合并（`_effective_sources`），因此 CLI/API 调用方引用 collect/source-add 已归档的来源时 `sources` 可留空，不会误报 `unknown_source`；真正未归档的引用仍被拒绝。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
-- validate RUN_ID：检查结构、答案状态语义、归档文件、时间、来源关联，以及 schema v6 standard run 的当前语义审查，不写 completed。
+- validate RUN_ID：检查结构、答案状态语义、归档文件、时间、来源关联、schema v6 standard run 的当前语义审查，以及 schema v8 富途/官方未解决数值冲突；不写 completed。
 - finish RUN_ID：校验后由服务渲染 company.md 和 research.json；schema v6 同时冻结 quality-review.json；有 baseline 时再渲染 review.md，全部产物哈希一并记录。旧 run 的产物不改写。
 - resume RUN_ID：仅 failed→draft，保留原草稿和来源；completed 拒绝。普通校验失败仍保持 draft，不滥用 failed。
 
@@ -91,7 +91,7 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 
 - source-add RUN_ID --input source-request.json：request 含 metadata 及 file 或 url，二者恰好一个。程序取得原始字节、计算哈希和实际 retrieved_at，不能接受用户伪造哈希/获取时间。
 - sources RUN_ID：列表返回元数据与 source_id；source-read RUN_ID SOURCE_ID [--page N | --start-line N] [--limit-lines N]：默认 120 行，上限 300 行与 20000 字符，返回 locator、截断标记和下一段位置。
-- collect RUN_ID [--kind all|market|fundamentals|filings]：all 默认，包含三者。market 含报价快照与财务原始数据（富途只读）；fundamentals 归档富途基本面变量（公司概况、高管、财报、主营构成、分红回购、股东、板块、估值/评级），每个数据集记 `dataset`/`evidence_class`/`available_from`/`currency`/`accounting_standard`/`observed_at`；filings 发现并归档最近年报/中期/季度报告（HKEX/SEC 公开渠道）。各任务在 `run_steps` 分列，失败/受限写 error_json 与 issues，不把 partial_success 当 complete coverage。只做数据收集，不生成评分、不 finish。至少一个子任务成功时退出 0，全部 failed/blocked 时退出 1。富途基本面能力与只读边界见 [docs/08-futu-data-capabilities.md](08-futu-data-capabilities.md)。
+- collect RUN_ID [--kind all|market|fundamentals|filings]：all 默认，包含三者。market 只归档报价快照；财务报表只由 fundamentals 的 `statements` 采集，避免重复请求。fundamentals 归档公司概况、高管、财报、主营构成、分红回购、股东和板块；标准研究不自动采集估值/评级。财报每类以 `num=50`/`next_key` 分页，保留最多 20 个去重年度期。每个数据集记 `dataset`/`evidence_class`/`available_from`/`currency`/`accounting_standard`/`observed_at`；filings 发现并归档最近年报/中期/季度报告（HKEX/SEC 公开渠道）。各任务在 `run_steps` 分列，失败/受限写 error_json 与 issues，不把 partial_success 当 complete coverage。采集后记录 `source_rank`/`extraction_method`，并用同 run 官方结构化明细核对富途数值。至少一个子任务成功时退出 0，全部 failed/blocked 时退出 1。富途基本面能力与只读边界见 [docs/08-futu-data-capabilities.md](08-futu-data-capabilities.md)。
 - collect ... --quiet：关闭简短 stderr 进度；默认输出采集阶段的简短进度，stdout JSON 契约不变。
 
 阶段 6（已实现）：
@@ -275,12 +275,12 @@ memo-read MEMO_ID
 
 ### 10.4 Agent 工具和模型协议
 
-当前只开放 `get_run_status`、`list_sources`、`read_source`、`search_archived_sources`、`read_report`、`list_memos`、`read_memo`。工具参数使用 Pydantic，工具结果有字符上限，循环有最大迭代次数和 token 预算。模型通过 JSON 决策协议选择 `tool_call`、`final` 或 `ask_user`；DeepSeek 由 Python 直接调用，不需要 OpenCode、MCP 或 LangGraph。
+阶段 18 在原有 `get_run_status`、`list_sources`、`read_source`、`search_archived_sources`、`read_report`、`list_memos`、`read_memo` 上新增 `query_archived_financials`、`run_trusted_calculation`、`create_analysis_dataset`、`run_analysis_code`、`read_analysis_result`。工具参数使用 Pydantic，工具结果有字符上限，循环有最大迭代次数和 token 预算。模型通过 JSON 决策协议选择 `tool_call`、`final` 或 `ask_user`；DeepSeek 由 Python 直接调用，不需要 OpenCode、MCP 或 LangGraph。
 
-`allow_network=true` 当前明确拒绝，并提示先使用固定 `collect`/`source-add`。未来若增加受控联网工具，必须单独定义权限、来源归档和 `as_of` 规则。
+`allow_network=true` 当前明确拒绝，并提示先使用固定 `collect`/`source-add`。临时代码先用可信固定计算；确有不足时只处理 `data/tmp/analysis/<session>/<execution>/input.json` 的最小副本，AST 禁止 import、属性访问、动态执行、shell、网络和任意文件访问。子进程清空环境变量，限制十秒、256 MB、64 KB 输出和每 session 三次执行，审计数据集/代码哈希、来源和结果摘要。未来若增加受控联网工具，必须单独定义权限、来源归档和 `as_of` 规则。
 
 ### 10.5 独立运行要求
 
-用户只提供 `DEEPSEEK_API_KEY`、可选的 `WONDER_DEEPSEEK_MODEL`，以及已归档资料或富途/OpenD 配置，就可以直接运行项目内 Agent CLI。无需 OpenCode 或其他外部宿主；SQLite、`data/`、session 和 Memo 是独立运行后的事实来源。
+用户只提供 `DEEPSEEK_API_KEY`、可选的 `WONDER_DEEPSEEK_MODEL`，以及已归档资料或富途/OpenD 配置，就可以直接运行项目内 Agent CLI。无需 OpenCode 或其他外部宿主；SQLite、`data/`、session、Scratchpad、Memory 和 Memo 是独立运行后的事实来源。`memory-search TICKER [--query TEXT]` 与 `memory-read MEMORY_ID` 是只读检查入口。
 
 实现交互 Agent 时，参考用户指定的 [Dexter](https://github.com/virattt/dexter) 的 Agent loop、tool registry、skills registry 和 scratchpad，但不复制其 Bun/TypeScript 技术栈，也不复制开放网络、股票筛选、估值/目标价或交易行为。

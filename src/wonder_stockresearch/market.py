@@ -1,4 +1,4 @@
-"""阶段 4 行情/财务只读适配器。
+"""阶段 4 行情快照只读适配器。
 
 只使用 OpenD 的行情上下文（OpenQuoteContext），不导入、不调用任何账户、
 持仓、资金或交易接口。futu-api 采用惰性 import，离线导入本模块不连接服务。
@@ -17,10 +17,7 @@ from .sources import SourceError
 
 DEFAULT_FUTU_HOST = "127.0.0.1"
 DEFAULT_FUTU_PORT = 11111
-FINANCIAL_RECORD_LIMIT = 10
 OPEND_PROBE_TIMEOUT_SECONDS = 2.0
-# get_financials_statements 的 statement_type：1 利润表 2 资产负债表 3 现金流量表 4 关键指标。
-FINANCIAL_STATEMENT_TYPES = {1: "利润表", 2: "资产负债表", 3: "现金流量表", 4: "关键指标"}
 
 
 class QuoteProvider(Protocol):
@@ -29,8 +26,6 @@ class QuoteProvider(Protocol):
     def search_quotes(self, keyword: str, max_count: int = 10) -> list[dict[str, Any]]: ...
 
     def market_snapshot(self, ticker: str) -> dict[str, Any]: ...
-
-    def financial_statements(self, ticker: str) -> dict[str, Any]: ...
 
     def close(self) -> None: ...
 
@@ -102,7 +97,7 @@ class FutuQuoteProvider:
                 from futu import OpenQuoteContext, SysConfig
             except ImportError as error:
                 raise SourceError(
-                    "futu_sdk_missing", "未安装 futu-api，行情/财务跳过", exit_code=2, blocked=True
+                    "futu_sdk_missing", "未安装 futu-api，行情快照跳过", exit_code=2, blocked=True
                 ) from error
             # futu SDK 默认把日志写到 stdout，会污染 CLI 的 JSON 契约，这里关闭控制台日志。
             SysConfig.enable_console_log(False)
@@ -151,40 +146,6 @@ class FutuQuoteProvider:
             }
             for item in records
         ]
-
-    def financial_statements(self, ticker: str) -> dict[str, Any]:
-        from futu import RET_OK
-        from futu.common.constant import F10Type
-
-        context = self._ctx()
-        statements: dict[str, Any] = {}
-        for statement_type, label in FINANCIAL_STATEMENT_TYPES.items():
-            ret, data = context.get_financials_statements(
-                ticker,
-                statement_type=statement_type,
-                financial_type=F10Type.ANNUAL,
-                num=FINANCIAL_RECORD_LIMIT,
-            )
-            if ret != RET_OK:
-                raise SourceError(
-                    "financial_statements_failed",
-                    f"get_financials_statements(statement_type={statement_type}) 失败：{data}",
-                )
-            raw = data if isinstance(data, dict) else {}
-            statements[str(statement_type)] = {
-                "label": label,
-                "next_key": raw.get("next_key"),
-                "structure_list": [_json_safe(item) for item in raw.get("structure_list", [])],
-                "report_list": [_json_safe(item) for item in raw.get("report_list", [])],
-            }
-        return {
-            "code": ticker,
-            "endpoint": "OpenQuoteContext.get_financials_statements",
-            "financial_type": "ANNUAL",
-            "record_limit": FINANCIAL_RECORD_LIMIT,
-            "unit_note": "futu 未提供 item 级单位，保留原始 data 值，不推断单位",
-            "statements": statements,
-        }
 
     def close(self) -> None:
         if self._context is not None:

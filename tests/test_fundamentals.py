@@ -95,14 +95,13 @@ def test_collect_fundamentals_archives_sources_and_steps(tmp_path: Path) -> None
     assert provider.closed is True
     listed = research.list_sources(root, run_id)["sources"]
     datasets = {source["metadata"].get("dataset") for source in listed}
-    assert {"statements", "dividends", "executives", "valuation"} <= datasets
+    assert {"statements", "dividends", "executives"} <= datasets
+    assert "valuation" not in datasets and "consensus" not in datasets
     statements = next(source for source in listed if source["metadata"].get("dataset") == "statements")
     assert statements["metadata"]["available_from"] == "2025-12-31"
     assert statements["metadata"]["evidence_class"] == "reported"
     assert statements["metadata"]["currency"] == "CNY"
     assert statements["metadata"]["accounting_standard"] == "国际会计准则"
-    valuation = next(source for source in listed if source["metadata"].get("dataset") == "valuation")
-    assert valuation["metadata"]["evidence_class"] == "snapshot"
     steps = research.get_status(root, run_id)["steps"]
     assert {step["step_key"] for step in steps} >= {key for key, _ in research.FUNDAMENTAL_TASKS}
 
@@ -230,3 +229,51 @@ def test_revenue_breakdown_archives_ten_annual_and_three_interim_periods(
     assert result["available_from"] == "2026-06-30"
     assert result["evidence_class"] == "reported"
     assert payload["history_failures"] == []
+
+
+def test_statements_follow_next_key_and_keep_at_most_twenty_unique_annual_periods(
+    monkeypatch,
+) -> None:
+    futu_module = ModuleType("futu")
+    futu_module.RET_OK = 0
+    constants = ModuleType("futu.common.constant")
+
+    class F10Type:
+        ANNUAL = "ANNUAL"
+
+    constants.F10Type = F10Type
+    monkeypatch.setitem(sys.modules, "futu", futu_module)
+    monkeypatch.setitem(sys.modules, "futu.common", ModuleType("futu.common"))
+    monkeypatch.setitem(sys.modules, "futu.common.constant", constants)
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str | None, int]] = []
+
+        def get_financials_statements(self, ticker: str, *, statement_type: int, financial_type: object, next_key: str | None, num: int):
+            self.calls.append((statement_type, next_key, num))
+            year = "2025" if next_key is None else "2024"
+            return 0, {
+                "structure_list": [{"field_id": 5001, "display_name": "净利润"}],
+                "report_list": [
+                    {
+                        "date_time_str": f"{year}-12-31",
+                        "period_text": f"{year}/FY",
+                        "currency_code": "CNY",
+                        "accounting_standards": "IFRS",
+                        "item_list": [{"field_id": 5001, "data": 1}],
+                    }
+                ],
+                "next_key": "next" if next_key is None else "-1",
+            }
+
+    provider = futu_fundamentals.FutuFundamentalsProvider()
+    context = FakeContext()
+    provider._context = context
+
+    result = provider.fetch("statements", "HK.00728")
+
+    assert all(num == 50 for _statement_type, _next_key, num in context.calls)
+    assert {next_key for _statement_type, next_key, _num in context.calls} == {None, "next"}
+    assert all(len(block["report_list"]) == 2 for block in result["payload"]["statements"].values())
+    assert result["payload"]["record_limit"] == 20

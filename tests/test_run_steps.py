@@ -129,9 +129,10 @@ def test_initialize_migrates_v1_database_to_run_steps(tmp_path: Path) -> None:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         stock = connection.execute("SELECT ticker FROM stocks").fetchone()
-    assert version == 7
+    assert version == storage.SCHEMA_VERSION
     assert "run_steps" in tables
     assert {"agent_sessions", "agent_events", "interactive_reports", "company_memos"} <= tables
+    assert {"agent_scratchpads", "memory_entries", "analysis_runs", "source_conflicts"} <= tables
     assert "metadata_json" in _step_columns(root)
     assert stock[0] == "HK.00728"
 
@@ -147,7 +148,7 @@ def test_initialize_migrates_v2_steps_adding_metadata_column(tmp_path: Path) -> 
     with storage.open_db(root) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         step = connection.execute("SELECT step_key, status FROM run_steps").fetchone()
-    assert version == 7
+    assert version == storage.SCHEMA_VERSION
     assert "metadata_json" in _step_columns(root)
     assert tuple(step) == ("collect", "succeeded")
 

@@ -30,7 +30,10 @@ from .market import (
 )
 from .sources import SourceError
 
-FINANCIAL_RECORD_LIMIT = 10
+# 接口每页最多 50 条；固定研究最多归档 20 个去重年度期，足以覆盖长期趋势而不把
+# 全量历史压进证据包。
+FINANCIAL_RECORD_LIMIT = 20
+FINANCIAL_PAGE_SIZE = 50
 REVENUE_ANNUAL_PERIOD_LIMIT = 10
 REVENUE_INTERIM_PERIOD_LIMIT = 3
 BUYBACK_RECORD_LIMIT = 20
@@ -242,31 +245,62 @@ class FutuFundamentalsProvider:
         currency = None
         standard = None
         for statement_type, label in ((1, "利润表"), (2, "资产负债表"), (3, "现金流量表"), (4, "关键指标")):
-            ret, data = self._ctx().get_financials_statements(
-                ticker,
-                statement_type=statement_type,
-                financial_type=F10Type.ANNUAL,
-                num=FINANCIAL_RECORD_LIMIT,
-            )
-            if ret != RET_OK:
-                raise SourceError(
-                    "futu_query_failed",
-                    f"get_financials_statements(statement_type={statement_type}) 失败：{data}",
+            next_key: str | None = None
+            reports_by_period: dict[str, dict[str, Any]] = {}
+            structure_list: list[Any] = []
+            page_count = 0
+            while len(reports_by_period) < FINANCIAL_RECORD_LIMIT:
+                ret, data = self._ctx().get_financials_statements(
+                    ticker,
+                    statement_type=statement_type,
+                    financial_type=F10Type.ANNUAL,
+                    next_key=next_key,
+                    num=FINANCIAL_PAGE_SIZE,
                 )
-            raw = data if isinstance(data, dict) else {}
-            reports = [_json_safe(row) for row in raw.get("report_list", [])]
+                if ret != RET_OK:
+                    raise SourceError(
+                        "futu_query_failed",
+                        f"get_financials_statements(statement_type={statement_type}) 失败：{data}",
+                    )
+                raw = data if isinstance(data, dict) else {}
+                if not structure_list:
+                    structure_list = [_json_safe(item) for item in raw.get("structure_list", [])]
+                for raw_report in raw.get("report_list", []):
+                    report = _json_safe(raw_report)
+                    if not isinstance(report, dict):
+                        continue
+                    period_key = str(report.get("period_text") or report.get("date_time_str") or "")
+                    if period_key:
+                        reports_by_period.setdefault(period_key, report)
+                    if len(reports_by_period) >= FINANCIAL_RECORD_LIMIT:
+                        break
+                page_count += 1
+                candidate = raw.get("next_key")
+                if not isinstance(candidate, str) or candidate in {"", "-1"} or candidate == next_key:
+                    break
+                next_key = candidate
+            reports = sorted(
+                reports_by_period.values(),
+                key=lambda row: str(row.get("date_time_str") or row.get("period_text") or ""),
+                reverse=True,
+            )[:FINANCIAL_RECORD_LIMIT]
             dates.extend(row.get("date_time_str") for row in reports)
             if reports and currency is None:
                 currency = reports[0].get("currency_code")
                 standard = reports[0].get("accounting_standards")
             statements[str(statement_type)] = {
                 "label": label,
-                "structure_list": [_json_safe(item) for item in raw.get("structure_list", [])],
+                "structure_list": structure_list,
                 "report_list": reports,
+                "pages_fetched": page_count,
             }
         return _dataset(
             "statements",
-            {"statements": statements, "record_limit": FINANCIAL_RECORD_LIMIT},
+            {
+                "statements": statements,
+                "record_limit": FINANCIAL_RECORD_LIMIT,
+                "page_size": FINANCIAL_PAGE_SIZE,
+            },
             available_from=_max_date(dates),
             currency=currency,
             accounting_standard=standard,

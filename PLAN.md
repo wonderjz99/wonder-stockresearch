@@ -1,6 +1,6 @@
 # wonder-stockresearch 实施计划
 
-状态：阶段 1–17 已实现；阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 已完成按需 Skill Catalog、Capability Registry、执行审计和 Writer/Agent 上下文加载；开放问题临时计算和 Pi Agent Core 评估继续后置，不引入 LangGraph。
+状态：阶段 1–18 已实现；阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 已完成按需 Skill Catalog、Capability Registry、执行审计和 Writer/Agent 上下文加载。阶段 18 已扩展既有 Python Agent loop：来源仲裁、工作记忆、长期记忆索引与受限 `AnalysisWorkspace` 均已落地；不引入 LangGraph、多 Agent 或 Pi runtime。
 目标：在独立项目中，从零实现可追溯的单股公司研究与手动复评，每阶段提供可运行代码和中文讲解。
 
 ## 1. 已确认决策
@@ -182,11 +182,20 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 - Router 只收到 name、description、path、kind、适用 capability 和可用性摘要；实际执行才加载正文/reference。固定 Writer 与交互 Agent 只保存名称、版本、内容哈希等审计摘要，不保存正文。
 - 当前能力为 `fixed_research`、`interactive_research` 和尚不可用的 `analysis_workspace`；后者只能由阶段 18 实现后启用。详见 `docs/14-skill-on-demand.md`。
 
-### 阶段 18–20：开放问题临时计算与 Runtime 评估（长期）
+### 阶段 18：开放问题 Agent、记忆与受限临时计算（已实现，2026-10-04）
 
-- 阶段 18 建立受限 `AnalysisWorkspace`，只读输入、独立临时目录、默认无网络/秘密/正式库写权限，保存代码与输入哈希和来源引用。
-- 阶段 19 按需求增加同行、估值、OCR、新数据源和专题 Skill；先定方法和验收，再增加 capability。
-- 阶段 20 用相同开放问题基准比较当前 Python loop、Pi Agent Core、Pi + 虚拟文件系统/受限 shell，以及需要真实隔离时的容器/E2B。Pi 若采用，只作为开放问题的 orchestration/runtime；Python 研究核心继续权威。
+- 固定研究继续使用 EvidencePack、可信计算、Writer、审查和 finish 门闸；只有既有交互 Agent loop 可以使用临时计算，且不会修改 `ResearchRun`、评分、门闸或 finish。
+- 新增双层来源策略：获取时优先富途结构化与官网结构化资料，权威判断时官方披露优先；搜索发现记录不能作为 supports。富途数值与同 run 官方结构化事实核对，`matched`、`provider_unverified` 和 `conflict` 都可追溯；未在草稿 conflicts 中明确解决的冲突阻止 validate/finish。
+- `market` 只获取快照；`futu_fundamentals.statements` 是唯一的财务报表入口，使用 Futu `next_key` 分页、每类最多 20 个去重年度期。标准采集不再自动取得 valuation/consensus。
+- schema v8 增加 Scratchpad、带 FTS 的记忆索引、analysis 执行审计与来源冲突；follow-up 只加载必要的工作状态和最多五条相关记忆，临时报告始终是 provisional。
+- 新增 `analysis_workspace` capability 和同名 Skill。它优先调用项目可信计算；不足时只对最小只读 JSON 副本执行受限 Python AST，记录数据集/代码哈希、结果和来源，限制十秒、256 MB、64 KB 输出以及每 session 三次执行。
+- `memory-search`、`memory-read` 和扩展后的 `ask-status` 可检查保存内容、Scratchpad、计算与分析审计。详见 [docs/15-open-question-agent.md](docs/15-open-question-agent.md)。
+
+### 阶段 19–21：新数据、运行时评估与专业能力（长期）
+
+- 阶段 19 按需求增加 SEC XBRL、同行、估值、OCR、新数据源和专题 Skill；先定方法和验收，再增加 capability。OCR 只处理原生提取失败或表格严重损坏的页。
+- 阶段 20 先以二十个开放问题比较当前 Python loop 与 `AnalysisWorkspace`，再按门槛比较 Pi Agent Core、Pi + 虚拟文件系统/受限 shell，以及需要更强隔离时的容器/E2B；Pi 若采用，只替换开放问题的 orchestration/runtime。
+- 阶段 21 从完成报告确定性生成带来源、as_of 和失效条件的事实记忆；只有质量或延迟有明确收益时，才用 `asyncio.TaskGroup` 加入最多三名受控 worker。Python 研究核心继续权威。
 
 ## 4. 每阶段完成要求
 

@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import research, storage
+from . import research, source_policy, storage
 from .models import (
     GATE_IDS,
     MOAT_IDS,
@@ -83,6 +83,9 @@ class EvidenceChunk(InternalModel):
     locator: str
     source_kind: str
     support_eligible: bool
+    source_rank: str = "official"
+    extraction_method: str = "unknown"
+    reconciliation_status: str = "not_applicable"
     content: str | None = None
     fields: dict[str, Any] | None = None
     period: str | None = None
@@ -248,7 +251,34 @@ def _provider_nodes(
             for key, item in context.items():
                 merged.setdefault(key, item)
             found.append((path, merged))
+        # 富途 financial statements 的 item_list 只给 field_id；将同一响应的
+        # structure_list.display_name 下沉，才能让固定计算和问题检索按真实科目工作。
+        field_names = {
+            str(item.get("field_id")): item.get("display_name")
+            for item in value.get("structure_list", [])
+            if isinstance(item, dict) and item.get("field_id") is not None and item.get("display_name")
+        }
+        if field_names and isinstance(value.get("report_list"), list):
+            for index, report in enumerate(value["report_list"]):
+                if not isinstance(report, dict):
+                    continue
+                enriched = dict(report)
+                raw_items = report.get("item_list")
+                if isinstance(raw_items, list):
+                    enriched["item_list"] = [
+                        {
+                            **item,
+                            "display_name": item.get("display_name")
+                            or field_names.get(str(item.get("field_id"))),
+                        }
+                        if isinstance(item, dict)
+                        else item
+                        for item in raw_items
+                    ]
+                found.extend(_provider_nodes(enriched, f"{path}.report_list[{index}]", context))
         for key, child in value.items():
+            if key == "report_list" and field_names:
+                continue
             found.extend(_provider_nodes(child, f"{path}.{key}", context))
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -309,7 +339,12 @@ def _text_candidates(
         content, truncated = _window_around_keywords(str(row["content"]), keywords)
         candidates.append((score, EvidenceChunk(
             source_id=str(row["source_id"]), locator=str(row["locator"]),
-            source_kind=source.kind, support_eligible=research._is_core_eligible(source, as_of),
+            source_kind=source.kind,
+            support_eligible=research._is_core_eligible(source, as_of)
+            and source_policy.supports_eligible(source),
+            source_rank=source_policy.rank_for(source).value,
+            extraction_method=source_policy.extraction_for(source).value,
+            reconciliation_status=source_policy.reconciliation_for(source).value,
             content=content, dataset=None, content_hash=str(row["content_hash"]), truncated=truncated,
         )))
     return candidates
@@ -336,7 +371,12 @@ def _provider_candidates(
             stored_fields = node if len(rendered) <= CHUNK_CHARS else {"excerpt": rendered[:CHUNK_CHARS]}
             candidates.append((score, EvidenceChunk(
                 source_id=source_id_text(source.id), locator=locator, source_kind=source.kind,
-                support_eligible=research._is_core_eligible(source, as_of), fields=stored_fields,
+                support_eligible=research._is_core_eligible(source, as_of)
+                and source_policy.supports_eligible(source),
+                source_rank=source_policy.rank_for(source).value,
+                extraction_method=source_policy.extraction_for(source).value,
+                reconciliation_status=source_policy.reconciliation_for(source).value,
+                fields=stored_fields,
                 period=str(node.get("period_text") or node.get("period") or node.get("date_time_str"))
                 if (node.get("period_text") or node.get("period") or node.get("date_time_str")) is not None else None,
                 currency=str(node.get("currency") or node.get("currency_code"))
@@ -349,13 +389,35 @@ def _provider_candidates(
     return candidates
 
 
+def _period_match(chunk: EvidenceChunk, as_of: Any) -> int:
+    """期间完整且不晚于 as_of 的候选优先；解析不了的资料保留但排序靠后。"""
+    if not chunk.period:
+        return 0
+    text = chunk.period.replace("/FY", "-12-31").replace("/H1", "-06-30")
+    try:
+        period = storage.parse_iso(text if "T" in text else f"{text}T00:00:00+00:00")
+        boundary = as_of if getattr(as_of, "tzinfo", None) else storage.parse_iso(str(as_of))
+    except (TypeError, ValueError):
+        return 0
+    return 1 if period <= boundary else -1
+
+
 def _select_question_chunks(
-    candidates: list[tuple[int, EvidenceChunk]], *, remaining_chars: int,
-    used_source_chunks: dict[str, int], max_chunks: int,
+    candidates: list[tuple[int, EvidenceChunk, Source]], *, remaining_chars: int,
+    used_source_chunks: dict[str, int], max_chunks: int, as_of: Any,
 ) -> list[EvidenceChunk]:
     chosen: list[EvidenceChunk] = []
     seen: set[tuple[str, str]] = set()
-    for _, chunk in sorted(candidates, key=lambda item: (-item[0], item[1].source_id, item[1].locator)):
+    for score, chunk, source in sorted(
+        candidates,
+        key=lambda item: source_policy.ranking_key(
+            usable=item[1].support_eligible,
+            question_match=item[0],
+            source=item[2],
+            period_match=_period_match(item[1], as_of),
+            locator=item[1].locator,
+        ),
+    ):
         key = (chunk.source_id, chunk.locator)
         if key in seen or used_source_chunks.get(chunk.source_id, 0) >= MAX_CHUNKS_PER_SOURCE:
             continue
@@ -377,10 +439,17 @@ def build_evidence_pack(
     if not indexed:
         _ensure_source_page_index(root, sources)
     question_ids = QUESTION_GROUPS[group_id]
+    source_by_id = {source_id_text(source.id): source for source in sources}
     candidates = {
         question_id: [
-            *_text_candidates(root, sources, question_id, as_of),
-            *_provider_candidates(root, sources, question_id, as_of),
+            *[
+                (score, chunk, source_by_id[chunk.source_id])
+                for score, chunk in _text_candidates(root, sources, question_id, as_of)
+            ],
+            *[
+                (score, chunk, source_by_id[chunk.source_id])
+                for score, chunk in _provider_candidates(root, sources, question_id, as_of)
+            ],
         ]
         for question_id in question_ids
     }
@@ -391,7 +460,7 @@ def build_evidence_pack(
     for question_id in question_ids:
         selected = _select_question_chunks(
             candidates[question_id], remaining_chars=MAX_PACK_CHARS - used_chars,
-            used_source_chunks=used_source_chunks, max_chunks=MIN_CHUNKS_PER_QUESTION,
+            used_source_chunks=used_source_chunks, max_chunks=MIN_CHUNKS_PER_QUESTION, as_of=as_of,
         )
         question_chunks[question_id].extend(selected)
         used_chars += sum(len(json.dumps(item.model_dump(mode="json"), ensure_ascii=False, default=str)) for item in selected)
@@ -403,7 +472,7 @@ def build_evidence_pack(
         selected = _select_question_chunks(
             [item for item in candidates[question_id] if (item[1].source_id, item[1].locator) not in existing],
             remaining_chars=MAX_PACK_CHARS - used_chars, used_source_chunks=used_source_chunks,
-            max_chunks=MAX_CHUNKS_PER_QUESTION - len(question_chunks[question_id]),
+            max_chunks=MAX_CHUNKS_PER_QUESTION - len(question_chunks[question_id]), as_of=as_of,
         )
         question_chunks[question_id].extend(selected)
         used_chars += sum(len(json.dumps(item.model_dump(mode="json"), ensure_ascii=False, default=str)) for item in selected)
