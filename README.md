@@ -2,7 +2,13 @@
 
 一个从零实现的个人港股、美股公司研究助手，同时作为逐步学习 Python 研究应用的项目。
 
-**当前状态：已完成阶段 6 的手动复评、备份与维护。** 可运行阶段 1 的 `validate-packet`/`render-packet`，阶段 2 的 `watch`、`start`、`save-draft`、`validate`、`finish`、`resume`、`status`、`history`，阶段 3 的 `source-add`、`sources`、`source-read`，阶段 4 的 `collect`（富途只读行情/财务 + HKEX/SEC 公告发现，带 `run_steps` 账本），阶段 5 的 project skill `skills/company-research/`（由 `opencode.json` 的 `skills.paths` 注册），以及阶段 6 的 `compare`、`backup` 与有 baseline 时 `finish` 生成 `review.md`。阶段 7 的 DeepSeek 直接写作入口是本版本必做交付，尚未实现。
+**当前状态：阶段 1–15 已实现。** 可运行阶段 1 的 `validate-packet`/`render-packet`，阶段 2 的 `watch`、`start`、`save-draft`、`validate`、`finish`、`resume`、`status`、`history`，阶段 3 的 `source-add`、`sources`、`source-read`，阶段 4 的 `collect`（富途只读行情/财务 + HKEX/SEC 公告发现，带 `run_steps` 账本），阶段 5 的 project skill `skills/company-research/`，阶段 6 的 `compare`/`backup`，阶段 7 的 `write-draft`，阶段 7.1 的 `collect --kind fundamentals`，阶段 8–10 的 `ask`、`ask-followup`、`ask-status`、`memo-save`、`memo-list`、`memo-read`，阶段 11–12 的 `chat`，阶段 13 的三家电信公司历史资料语料，以及阶段 14–15 的报告可读性、Writer 问题对齐与校验失败反馈。真实 DeepSeek writer 与 chat 路由 smoke 已跑通；本阶段没有调用真实 Writer API。
+
+阶段 7.2 已为 DeepSeek writer 增加 `gap` schema 约束和一次受控结构修复；修复失败不会保存未经校验的草稿或自动 `finish`。
+
+新执行 `finish` 的报告会展示完整 Q01–Q24 问题、中文状态标签、带千位分隔且保留原精度的数值，以及可追溯的短引用索引。交互终端会显示冻结结果摘要和报告绝对路径；管道/重定向仍输出 JSON。历史完成报告保持原样。详见[报告可读性与定稿反馈](docs/11-report-presentation.md)。
+
+DeepSeek Writer 现会收到同一份完整 Q01–Q24 问题定义，明确避免把利润率/现金流错放为 Q03 答案、把 EPS/资产负债表指标错放为 Q04 技术替代答案。自然语言研究未通过证据校验时，终端会显示具体错误与 run_id，不会静默退出或冻结报告。详见[Writer 问题对齐与校验失败反馈](docs/12-question-alignment-and-validation-feedback.md)。
 
 ## 在新 Codex 会话中继续
 
@@ -14,7 +20,7 @@
 
 ## 已确定的产品方向
 
-- 输入单只股票代码，借助 OpenCode 和 Python 完成公司研究。
+- 输入单只股票代码，使用项目内 Python CLI、DeepSeek API 和富途/其他已配置数据源即可独立完成公司研究；不需要 OpenCode 或任何外部宿主。
 - 手动研究股票清单，不读取账户、持仓或资金，不执行交易。
 - 公司报告覆盖 moat Standard 的公司部分：Q01–Q24、六项公司门闸、六项护城河评分。
 - 原 28 问中的 Q25–Q28 属于估值，独立保留需求，首版不实现；不称为完整原版 28 问报告。
@@ -24,32 +30,55 @@
 ## 最小架构
 
 ```text
-用户 ↔ OpenCode + 公司研究 skill（第 5 阶段）
-                     ↓ CLI / JSON
-             Python 研究服务
-              ↙           ↘
-       富途与公开资料     SQLite + 股票文件夹
-                              ↓
-                        Markdown 报告
+固定 Prompt/CLI ───────────────→ 标准 ResearchRun → 正式报告
+开放问题 → 独立交互 Agent → 临时 InteractiveReport → 用户确认后 Memo
+                         ↓
+              Python 研究服务 + DeepSeek API
+                 ↙                    ↘
+          富途/归档资料          SQLite + 股票文件夹
 ```
 
-先做独立 Python CLI，再由 OpenCode 使用。当前不把核心改成 Agent；OpenCode 是受人工监督的宿主，SQLite/文件和 Python 服务才是研究事实来源。阶段 4 已增加轻量 `run_steps` 执行明细（schema v2），用于采集任务、失败重试和 provider 错误记录，但不引入通用工作流框架。
+固定研究流程、交互 Agent、Skill Registry 和自然语言入口都由项目内 Python 独立提供，不需要 OpenCode 或其他外部宿主。`chat` 会读取项目 Skill、调用 DeepSeek 做结构化路由，再选择固定研究或交互 Agent。阶段 4 的 `run_steps` 仍只是采集执行账本；交互 Agent 使用独立 session/event/report/Memo 数据表，`chat_sessions` 只保存自然语言确认和恢复状态，不修改正式 ResearchRun。
 
-Pi Coding Agent 可以在以后试用同一 CLI，首版不同时适配两个宿主。阶段 7 将由 Python 直接调用 DeepSeek 生成结构化研究草稿，复用同一套校验、评分与报告服务，并保持用户显式 `finish`；只有在阶段 7 后的真实运行出现动态补证据、跨天恢复或多步并行等需求时，才评估独立的 LangGraph 编排层。Temporal、Prefect、多 Agent 和 MCP 均不属于当前版本。
+阶段 7 由 Python 直接调用 DeepSeek 生成正式报告草稿；阶段 8–10 的交互 Agent 同样由 Python 直接调用 DeepSeek，用户只需配置 API Key 以及富途/OpenD 或已归档资料即可运行。交互 Agent 只生成临时报告，只有 `memo-save` 才保存 Memo；不自动修改正式报告或执行 `finish`。LangGraph 仍需真实复杂度证据后再评估。
 
-## 在 OpenCode 中使用
+## 独立运行
 
-项目 skill 正文在 `skills/company-research/SKILL.md`，由项目根 `opencode.json` 注册：
+自然语言和 Agent 能力由项目 Python CLI 提供，`Skill Registry` 会直接读取 `skills/**/SKILL.md`，不需要单独安装 skill 到外部宿主：
 
-```json
-{ "$schema": "https://opencode.ai/config.json", "skills": { "paths": ["skills"] } }
+```bash
+wonder-research --root <项目根> ask HK.00728 --input question.json
+wonder-research --root <项目根> ask-followup <SESSION_ID> --input followup.json
+wonder-research --root <项目根> memo-save <SESSION_ID> --input memo.json
+wonder-research --root <项目根> chat
+wonder-research --root <项目根> chat --text "帮我研究一下中国移动"
 ```
 
-在该目录启动 OpenCode，重启一次以加载 skill，然后用自然语言让宿主按 skill 调用 `uv run wonder-research ...`。skill 只调用已有 CLI（start/collect/sources/source-read/source-add/save-draft/validate/finish/status/history），不接 MCP、不读账户、不让模型直接写数据库。修改 skill 或 `opencode.json` 后需再次重启。
+`opencode.json` 和阶段 5 文档只保留历史集成记录，不属于项目运行依赖。未来用户自建 Agent 可以按需调用本项目 CLI/API，但固定研究、交互分析和数据归档在本项目 Python 运行时内完成。
+
+`chat` 支持不严格的自然语言。系统会先识别意图和公司，并在启动正式研究前询问确认；正式研究自动执行到 `validate`，通过后还要再次确认才会 `finish`。如果简称有歧义，例如“保利”，系统会先查本地清单和富途 `get_search_quote`，展示候选并等待用户输入编号、完整名称或 ticker，不会自动猜测。直接在终端使用 `chat --text` 时，会保留当前 session 并继续等待确认/追问；如果 stdout 被管道或重定向，则保持一次性 JSON 输出，适合脚本。长任务的简短进度写入 stderr。
+
+## 配置 DeepSeek（可选，项目根 .env）
+
+`write-draft` 需要 DeepSeek 凭据。项目会加载**项目根目录的 `.env`**（已加入 `.gitignore`，不会提交）：
+
+```bash
+cp .env.example .env      # 已为你创建；打开填入自己的值
+# .env 内容示例：
+# DEEPSEEK_API_KEY=sk-你的key
+# WONDER_DEEPSEEK_MODEL=deepseek-flash
+```
+
+- `.env` 与 `.env.example` 是不同的文件：`.env` 本地保存密钥、永不提交；`.env.example` 是模板，会提交。
+- 已存在的 shell 环境变量优先，`.env` 不覆盖它们；密钥不写入数据库、日志或 `run_steps`。
+- 加载发生在 `--root` 解析之后；若你把 `.env` 放在项目根，项目内 CLI 会读取，无需额外 export。
+- 若对已完成 run 调用 `write-draft`，会得到 `run_completed`；请先 `start` 新 run 并 `collect`/`source-add`。
+
+`write-draft` 默认 **关闭 thinking**（`WONDER_DEEPSEEK_THINKING=disabled`）并使用 **温度 0.2**（`WONDER_DEEPSEEK_TEMPERATURE`），可通过 `--thinking`、`--temperature` 覆盖。DeepSeek 官方文档说明 thinking 模式默认开启且不支持 temperature；结构化写作关闭 thinking 可避免推理 token 挤占输出预算（否则 JSON 会被截断）。文档与命令示例见 [阶段 7](docs/07-deepseek-writer.md)。
 
 ## 给后续 coding agent 的固定交代
 
-每次继续开发时，先读 [AGENTS.md](AGENTS.md)、[PLAN.md](PLAN.md)、[PROGRESS.md](PROGRESS.md) 及技术规格，再检查代码、工作区改动和实际测试。默认只实现 `PROGRESS.md` 指定的下一个阶段：保持函数/CLI/SQLite/文件核心，不提前引入 LangGraph、Temporal、Prefect、MCP 或多 Agent；模型输出必须经过现有 Pydantic、引用、评分和 `finish` 校验；完成代码、测试、中文讲解和进度更新后暂停。
+每次继续开发时，先读 [AGENTS.md](AGENTS.md)、[PLAN.md](PLAN.md)、[PROGRESS.md](PROGRESS.md)、[docs/09-agent-layer.md](docs/09-agent-layer.md) 及技术规格，再检查代码、工作区改动和实际测试。实现交互 Agent 时必须参考用户指定的 [Dexter](https://github.com/virattt/dexter) 主循环、工具注册表、Skills 和 Scratchpad，但保持 Python/CLI/SQLite 核心；模型输出必须经过 Pydantic 和来源边界校验。不要引入 LangGraph，除非 PLAN 规定的复杂度门槛已满足。
 
 ## 阅读入口
 
@@ -58,8 +87,15 @@ Pi Coding Agent 可以在以后试用同一 CLI，首版不同时适配两个宿
 - [阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)：表结构、run 生命周期与写锁。
 - [阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)：下载/导入、哈希、提取与片段读取。
 - [阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)：collect、run_steps、HKEX/SEC 与富途适配器。
-- [阶段 5：OpenCode + CLI 端到端研究](docs/05-opencode-and-tools.md)：project skill、宿主职责与 HK.00728 实跑记录。
+- [阶段 5 历史集成记录](docs/05-opencode-and-tools.md)：早期 OpenCode + CLI 实跑；非当前依赖或产品运行路径。
 - [阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)：compare、review.md、backup 与恢复验证。
+- [阶段 7：DeepSeek 直接写作入口](docs/07-deepseek-writer.md)：write-draft、受控上下文、凭据与 run_steps 记录。
+- [富途数据能力清单](docs/08-futu-data-capabilities.md)：futu-api 能提供哪些数据、只读边界与 as_of 可用性。
+- [交互 Agent 层](docs/09-agent-layer.md)：固定流程、临时报告、Memo、独立运行和 Dexter 参考边界。
+- [独立自然语言入口](docs/10-standalone-natural-language.md)：Skill Registry、Router、chat、确认和进度事件。
+- [报告可读性与定稿反馈](docs/11-report-presentation.md)：终端完成摘要、正式报告排版和短引用索引。
+- [Writer 问题对齐与校验失败反馈](docs/12-question-alignment-and-validation-feedback.md)：完整问题上下文、Q03/Q04 专项约束和失败诊断。
+- [固定研究质量流水线](docs/13-fixed-research-quality.md)：分组证据包、可信计算、语义审查、断点恢复和三家电信实测。
 - [研究规格](docs/research-spec.md)：问题、门闸、评分和证据规则。
 - [技术规格](docs/technical-spec.md)：数据与 CLI 契约。
 - [教学约定](docs/teaching-contract.md)：每阶段如何实现、验证和讲解。
@@ -79,11 +115,21 @@ uv run wonder-research --help
 uv run wonder-research --root <项目根> start HK.00728
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind filings
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind market
+uv run wonder-research --root <项目根> collect <RUN_ID> --kind fundamentals
 uv run wonder-research --root <项目根> start HK.00728 --baseline <BASELINE_RUN>
 uv run wonder-research --root <项目根> compare <RUN_ID>
 uv run wonder-research --root <项目根> backup --output data/backups/<NAME>
+DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> write-draft <RUN_ID> --strategy staged
+DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> review-draft <RUN_ID>
+uv run wonder-research --root <项目根> draft-read <RUN_ID>
+uv run wonder-research --root <项目根> review-read <RUN_ID>
+uv run wonder-research --root <项目根> draft-preview <RUN_ID>
+DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> ask HK.00728 --input question.json
+DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> chat --text "分析中国电信未来两年的主要风险"
 ```
+
+`write-draft` 只在运行环境读取 `DEEPSEEK_API_KEY`（不写入项目/日志/数据库），默认模型 `deepseek-flash`，可用 `--model` 或 `WONDER_DEEPSEEK_MODEL` 覆盖；默认分六组写作并做语义审查，只保存草稿，不会自动 `finish`。schema v6 及以后的新 standard run 必须有当前草稿对应的 passing review 才能定稿；schema v7 另为已归档年报建立本地页级检索索引。
 
 `collect --kind market` 需要本机 OpenD（默认 `127.0.0.1:11111`，可用 `WONDER_FUTU_HOST`/`WONDER_FUTU_PORT` 覆盖），只读行情/财务；`collect --kind filings` 使用 HKEX 官方渠道，SEC 通道需设置 `WONDER_SEC_USER_AGENT`。这些都是用户运行环境配置，程序不读取账户秘密。
 
-各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5：OpenCode + CLI 端到端研究](docs/05-opencode-and-tools.md)、[阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)。正式报告由 `finish` 从已校验草稿生成并归档；有 baseline 时同时生成 `review.md`；`render-packet` 仍只是离线样例，不是正式完成记录。
+各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5 历史集成记录](docs/05-opencode-and-tools.md)、[阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)、[阶段 7：DeepSeek 直接写作入口](docs/07-deepseek-writer.md)、[富途数据能力清单](docs/08-futu-data-capabilities.md)。正式报告由 `finish` 从已校验草稿生成并归档；有 baseline 时同时生成 `review.md`；`write-draft` 只生成草稿；`render-packet` 仍只是离线样例，不是正式完成记录。

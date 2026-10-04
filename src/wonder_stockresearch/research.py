@@ -13,11 +13,14 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from . import disclosures, market, sources, storage
+from pydantic import ValidationError
+
+from . import disclosures, futu_fundamentals, market, progress, sources, storage
 from .models import (
     GATE_IDS,
     MOAT_IDS,
     QUESTION_IDS,
+    DraftReview,
     EvidenceRef,
     ResearchDraft,
     ResearchPacket,
@@ -57,6 +60,7 @@ def derive_quality_status(draft: ResearchDraft) -> str:
     """给报告的保守质量标签，不将其写回用户输入。"""
     if (
         any(answer.status != "answered" for answer in draft.answers)
+        or any(answer.status == "answered" and answer.gap is not None for answer in draft.answers)
         or any(gate.result == "insufficient" for gate in draft.gates)
         or any(moat.score is None for moat in draft.moats)
     ):
@@ -113,8 +117,9 @@ def _is_core_eligible(source: Source, as_of: datetime) -> bool:
 
     - primary：必须有已知发布日期且不晚于 as_of；只有日期时以当地日终为保守可用时点；
       发布日期未知只作背景。
-    - provider：必须有可解析的 metadata.observed_at 且不晚于 as_of，且
-      metadata.observed_after_as_of 不为 true；观测晚于 as_of 时只作本次下载结果。
+    - provider（方案 4）：若有 metadata.available_from（报告期末/披露日）则按它判断，
+      不晚于 as_of 即可支撑；否则按实时快照规则要求 observed_at 可解析且不晚于 as_of，
+      且 observed_after_as_of 不为 true。
     - secondary / legacy：不独立支撑核心结论。
     """
     if source.kind not in {"primary", "provider"}:
@@ -129,6 +134,11 @@ def _is_core_eligible(source: Source, as_of: datetime) -> bool:
             end_of_day = published_at.replace(hour=23, minute=59, second=59, microsecond=999999)
             return as_of >= end_of_day
         return True
+    # provider：方案 4 —— 有明确期间/披露日的已报告数据（available_from）可在 as_of 前支撑核心结论；
+    # 实时快照（无 available_from）仍按 observed_at 规则，晚于 as_of 只能作 context。
+    available_from = _parse_metadata_time(source.metadata.get("available_from"))
+    if available_from is not None:
+        return available_from <= as_of
     if source.metadata.get("observed_after_as_of") is True:
         return False
     observed_at = _parse_metadata_time(source.metadata.get("observed_at"))
@@ -230,6 +240,14 @@ def validate_packet(packet: ResearchPacket) -> list[ValidationIssue]:
 
     for answer_index, answer in enumerate(draft.answers):
         answer_location = f"draft.answers[{answer_index}]"
+        if answer.status == "answered" and answer.gap is not None:
+            issues.append(
+                ValidationIssue(
+                    "answered_with_gap",
+                    answer_location,
+                    "answered 表示该题无未解决证据缺口；存在 gap 时应标为 partial 或 missing",
+                )
+            )
         for statement_index, statement in enumerate(answer.statements):
             statement_location = f"{answer_location}.statements[{statement_index}]"
             _append_unknown_source_issues(issues, statement, statement_location, sources)
@@ -485,7 +503,72 @@ def validate_run(root: Path, run_id: str) -> list[ValidationIssue]:
         if not run["draft_json"]:
             return [ValidationIssue("empty_draft", "draft", "该 run 还没有保存草稿")]
         packet = _packet_from_run(connection, run)
-        return list(validate_packet(packet)) + _archive_issues(root, packet)
+        return list(validate_packet(packet)) + _archive_issues(root, packet) + _semantic_review_issues(connection, run, packet)
+
+
+def _semantic_review_issues(
+    connection: object, run: dict[str, object], packet: ResearchPacket
+) -> list[ValidationIssue]:
+    """schema v6 起，standard run 必须有与当前草稿匹配的 passing review。"""
+    if run["kind"] != "standard" or int(run["schema_version"]) < 6:
+        return []
+    # 仓库内的虚构教学 packet 用于验证旧生命周期；它不代表可定稿的真实公司研究。
+    if packet.sources and all(source.metadata.get("teaching") is True for source in packet.sources):
+        return []
+    row = storage.latest_draft_review(connection, str(run["id"]))  # type: ignore[arg-type]
+    if row is None:
+        return [ValidationIssue("semantic_review_missing", "review", "该草稿尚未完成语义审查")]
+    from .fixed_quality import validate_review
+
+    try:
+        review = DraftReview.model_validate_json(row["review_json"])
+    except ValidationError:
+        return [ValidationIssue("semantic_review_failed", "review", "保存的语义审查结构无效")]
+    return validate_review(
+        review,
+        packet.draft,
+        {source_id_text(source.id) for source in packet.sources},
+    )
+
+
+def save_draft_review(
+    root: Path,
+    run_id: str,
+    review: DraftReview,
+    *,
+    reviewer_type: str,
+    provider: str | None,
+    model: str | None,
+    template_version: str,
+) -> tuple[dict[str, object], list[ValidationIssue]]:
+    """校验并保存模型或人工审查；不允许虚假通过、漏审或越界引用。"""
+    storage.initialize(root)
+    with storage.project_lock(root), storage.open_db(root) as connection:
+        run = _require_run(connection, run_id)
+        if run["status"] != "draft":
+            raise ResearchError("invalid_status", "只有 draft 可以保存语义审查", exit_code=2)
+        packet = _packet_from_run(connection, run)
+        from .fixed_quality import validate_review
+
+        validation = validate_review(
+            review, packet.draft, {source_id_text(source.id) for source in packet.sources}
+        )
+        structural = [issue for issue in validation if issue.code != "semantic_review_failed"]
+        if structural:
+            raise ResearchError("invalid_semantic_review", "语义审查结果无效", exit_code=2, issues=structural)
+        storage.insert_draft_review(
+            connection,
+            run_id=run_id,
+            draft_hash=review.draft_hash,
+            status=review.status,
+            reviewer_type=reviewer_type,
+            provider=provider,
+            model=model,
+            template_version=template_version,
+            review_json=review.model_dump_json(),
+            created_at=storage.now_utc(),
+        )
+    return {"run_id": run_id, "review_status": review.status, "draft_hash": review.draft_hash}, validation
 
 
 def _verify_completed_artifacts(root: Path, run: dict[str, object]) -> dict[str, object]:
@@ -520,7 +603,7 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
         if not run["draft_json"]:
             raise ResearchError("empty_draft", "该 run 还没有保存草稿", exit_code=2)
         packet = _packet_from_run(connection, run)
-        issues = validate_packet(packet) + _archive_issues(root, packet)
+        issues = validate_packet(packet) + _archive_issues(root, packet) + _semantic_review_issues(connection, run, packet)
         if issues:
             raise ResearchError(
                 "validation_failed", "草稿未通过校验，未生成正式报告", exit_code=2, issues=issues
@@ -546,6 +629,10 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             "draft": json.loads(draft.model_dump_json()),
             "sources": [json.loads(source.model_dump_json()) for source in packet.sources],
         }
+        quality_review_row = storage.latest_draft_review(connection, run_id)
+        if quality_review_row is not None and int(run["schema_version"]) >= 6:
+            quality_review = json.loads(quality_review_row["review_json"])
+            snapshot["quality_review"] = quality_review
         if comparison is not None:
             snapshot["comparison"] = comparison
         directory = storage.run_dir(
@@ -557,6 +644,11 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
                 directory / "research.json",
                 json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
             )
+            if quality_review_row is not None and int(run["schema_version"]) >= 6:
+                storage.write_atomic(
+                    directory / "quality-review.json",
+                    json.dumps(quality_review, ensure_ascii=False, indent=2) + "\n",
+                )
             if comparison is not None:
                 storage.write_atomic(directory / "review.md", render_review(comparison))
         except OSError as error:
@@ -574,6 +666,8 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
         }
         if comparison is not None:
             hashes["review.md"] = storage.sha256_file(directory / "review.md")
+        if quality_review_row is not None and int(run["schema_version"]) >= 6:
+            hashes["quality-review.json"] = storage.sha256_file(directory / "quality-review.json")
         connection.execute("BEGIN IMMEDIATE")
         try:
             updated = storage.mark_run_completed(
@@ -636,9 +730,117 @@ def get_status(root: Path, run_id: str) -> dict[str, object]:
             data["answer_count"] = 0
         data["source_count"] = len(storage.get_run_sources(connection, run_id))
         data["steps"] = storage.list_steps(connection, run_id)
+        write_steps = [step for step in data["steps"] if step["step_key"] == "write_draft"]  # type: ignore[index]
+        if write_steps:
+            latest_metadata = write_steps[-1].get("metadata_json")  # type: ignore[union-attr]
+            parsed_metadata = json.loads(latest_metadata) if latest_metadata else {}
+            calls = int(parsed_metadata.get("model_calls") or len(parsed_metadata.get("model_attempts") or []))
+            data["call_budget"] = {
+                "used": calls,
+                "limit": 14,
+                "remaining": max(0, 14 - calls),
+                "revisions": int(parsed_metadata.get("revisions") or 0),
+            }
+        else:
+            data["call_budget"] = {"used": 0, "limit": 14, "remaining": 14, "revisions": 0}
+        sections = storage.list_draft_sections(connection, run_id)
+        data["draft_sections"] = [
+            {
+                "section_key": item["section_key"],
+                "input_hash": item["input_hash"],
+                "output_hash": item["output_hash"],
+                "provider": item["provider"],
+                "model": item["model"],
+                "template_version": item["template_version"],
+                "created_at": item["created_at"],
+            }
+            for item in sections
+        ]
+        review_row = storage.latest_draft_review(connection, run_id)
+        if review_row is None:
+            data["semantic_review"] = {"status": "missing"}
+        else:
+            review = DraftReview.model_validate_json(review_row["review_json"])
+            current_hash = None
+            if run["draft_json"]:
+                from .fixed_quality import draft_hash
+                current_hash = draft_hash(ResearchDraft.model_validate_json(run["draft_json"]))
+            data["semantic_review"] = {
+                "status": "stale" if current_hash != review.draft_hash else review.status,
+                "draft_hash": review.draft_hash,
+                "issue_count": len(review.issues),
+                "error_count": sum(issue.severity == "error" for issue in review.issues),
+                "warning_count": sum(issue.severity == "warning" for issue in review.issues),
+                "reviewer_type": review_row["reviewer_type"],
+            }
+            data["draft_hash"] = current_hash
         if run["error_json"]:
             data["error"] = json.loads(run["error_json"])
     return data
+
+
+def get_draft(root: Path, run_id: str) -> dict[str, object]:
+    """读取当前保存的草稿，不生成报告、不改变 run。"""
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        run = _require_run(connection, run_id)
+        if not run["draft_json"]:
+            raise ResearchError("empty_draft", "该 run 尚无已保存草稿", exit_code=2)
+        draft = ResearchDraft.model_validate_json(run["draft_json"])
+    from .fixed_quality import draft_hash
+
+    return {
+        "run_id": run_id,
+        "ticker": run["ticker"],
+        "status": run["status"],
+        "draft_hash": draft_hash(draft),
+        "draft": draft.model_dump(mode="json"),
+    }
+
+
+def get_draft_review(root: Path, run_id: str) -> dict[str, object]:
+    """读取最新结构化审查，不触发模型调用或保存。"""
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        run = _require_run(connection, run_id)
+        row = storage.latest_draft_review(connection, run_id)
+        if row is None:
+            raise ResearchError("review_missing", "该 run 尚无已保存语义审查", exit_code=2)
+        review = DraftReview.model_validate_json(row["review_json"])
+    return {
+        "run_id": run_id,
+        "ticker": run["ticker"],
+        "reviewer_type": row["reviewer_type"],
+        "provider": row["provider"],
+        "model": row["model"],
+        "template_version": row["template_version"],
+        "created_at": row["created_at"],
+        "review": review.model_dump(mode="json"),
+    }
+
+
+def preview_draft(root: Path, run_id: str) -> dict[str, object]:
+    """生成 data/tmp 下的非权威 Markdown 草稿预览，不改变 run。"""
+    from .reports import render_company, render_draft_review
+
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        run = _require_run(connection, run_id)
+        packet = _packet_from_run(connection, run)
+        review_row = storage.latest_draft_review(connection, run_id)
+        review = DraftReview.model_validate_json(review_row["review_json"]) if review_row else None
+    directory = root / "data" / "tmp" / "draft-previews" / run_id
+    draft_path = directory / "draft.md"
+    storage.write_atomic(
+        draft_path,
+        render_company(packet, preview=True, run_id=run_id),
+    )
+    artifacts: dict[str, str] = {"draft.md": storage.relative_path(root, draft_path)}
+    if review is not None:
+        review_path = directory / "quality-review.md"
+        storage.write_atomic(review_path, render_draft_review(review, run_id=run_id))
+        artifacts["quality-review.md"] = storage.relative_path(root, review_path)
+    return {"run_id": run_id, "ticker": run["ticker"], "status": run["status"], "artifacts": artifacts}
 
 
 def get_history(root: Path, ticker: str) -> dict[str, object]:
@@ -865,7 +1067,15 @@ def _input_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _begin_step(root: Path, run_id: str, step_key: str, provider: str, input_hash: str) -> int:
+def _begin_step(
+    root: Path,
+    run_id: str,
+    step_key: str,
+    provider: str,
+    input_hash: str,
+    *,
+    model: str | None = None,
+) -> int:
     with storage.project_lock(root), storage.open_db(root) as connection:
         attempt = storage.next_step_attempt(connection, run_id, step_key)
         storage.insert_step(
@@ -876,6 +1086,7 @@ def _begin_step(root: Path, run_id: str, step_key: str, provider: str, input_has
             status="running",
             provider=provider,
             input_hash=input_hash,
+            model=model,
             started_at=storage.now_utc(),
         )
     return attempt
@@ -890,8 +1101,10 @@ def _end_step(
     *,
     output_ref: str | None = None,
     error: dict[str, object] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     error_json = json.dumps(error, ensure_ascii=False) if error else None
+    metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
     with storage.project_lock(root), storage.open_db(root) as connection:
         storage.finish_step(
             connection,
@@ -901,6 +1114,7 @@ def _end_step(
             status=status,
             output_ref=output_ref,
             error_json=error_json,
+            metadata_json=metadata_json,
             finished_at=storage.now_utc(),
         )
 
@@ -936,6 +1150,18 @@ def _collect_market(
         try:
             payload = call(ticker)
             observed_at = storage.to_iso(storage.now_utc())
+            available_from = None
+            currency = None
+            accounting_standard = None
+            if step_key == "financial_statements":
+                dates: list[object] = []
+                for block in payload.get("statements", {}).values():
+                    for row in block.get("report_list", []):
+                        dates.append(row.get("date_time_str"))
+                        if currency is None and row.get("currency_code"):
+                            currency = row.get("currency_code")
+                            accounting_standard = row.get("accounting_standards")
+                available_from = futu_fundamentals._max_date(dates)
             body = json.dumps(
                 {"provider": provider.name, "observed_at": observed_at, **payload},
                 ensure_ascii=False,
@@ -957,6 +1183,10 @@ def _collect_market(
                     metadata={
                         "provider": provider.name,
                         "endpoint": payload.get("endpoint"),
+                        "evidence_class": "reported" if available_from else "snapshot",
+                        "available_from": available_from,
+                        "currency": currency,
+                        "accounting_standard": accounting_standard,
                         "observed_at": observed_at,
                         "observed_after_as_of": storage.parse_iso(observed_at)
                         > storage.parse_iso(current["as_of"]),
@@ -1099,6 +1329,94 @@ def _collect_filings(
     return [result]
 
 
+FUNDAMENTAL_TASKS = (
+    ("fundamentals_company", ("profile", "executives", "plates", "shareholders")),
+    ("fundamentals_financials", ("statements", "operational_efficiency")),
+    ("fundamentals_revenue", ("revenue_breakdown",)),
+    ("fundamentals_capital", ("dividends", "buybacks")),
+    ("fundamentals_valuation", ("valuation", "consensus")),
+)
+
+
+def _collect_fundamentals(
+    root: Path, run: dict[str, object], provider: futu_fundamentals.FundamentalsProvider
+) -> list[dict[str, object]]:
+    run_id = str(run["id"])
+    ticker = str(run["ticker"])
+    results: list[dict[str, object]] = []
+    for step_key, datasets in FUNDAMENTAL_TASKS:
+        input_hash = _input_hash({"ticker": ticker, "step": step_key, "provider": provider.name})
+        attempt = _begin_step(root, run_id, step_key, provider.name, input_hash)
+        source_ids: list[str] = []
+        failures: list[dict[str, object]] = []
+        observed_at = storage.to_iso(storage.now_utc())
+        for dataset in datasets:
+            try:
+                payload = provider.fetch(dataset, ticker)
+                body = json.dumps(
+                    {"provider": provider.name, "dataset": dataset, "observed_at": observed_at, **payload},
+                    ensure_ascii=False,
+                    default=str,
+                ).encode("utf-8")
+                with storage.project_lock(root), storage.open_db(root) as connection:
+                    current = _require_run(connection, run_id)
+                    if current["status"] == "completed":
+                        raise ResearchError("run_completed", "run 已完成，停止登记", exit_code=2)
+                    source, _ = _register_source(
+                        root,
+                        connection,
+                        current,
+                        kind="provider",
+                        title=f"{ticker} 基本面-{dataset}",
+                        data=body,
+                        extension="json",
+                        endpoint=f"futu.{dataset}",
+                        metadata={
+                            "provider": provider.name,
+                            "dataset": dataset,
+                            "evidence_class": payload.get("evidence_class"),
+                            "available_from": payload.get("available_from"),
+                            "currency": payload.get("currency"),
+                            "accounting_standard": payload.get("accounting_standard"),
+                            "observed_at": observed_at,
+                            "observed_after_as_of": storage.parse_iso(observed_at)
+                            > storage.parse_iso(current["as_of"]),
+                        },
+                    )
+                source_ids.append(source_id_text(source.id))
+            except (sources.SourceError, ResearchError) as error:
+                failures.append(_error_payload(error))
+        error_payload = {"failures": failures} if failures else None
+        if source_ids:
+            _end_step(
+                root, run_id, step_key, attempt, "succeeded",
+                output_ref=f"source:{source_ids[0]}", error=error_payload,
+            )
+            results.append(
+                {
+                    "step_key": step_key,
+                    "status": "succeeded",
+                    "datasets": list(datasets),
+                    "source_ids": source_ids,
+                    "failures": failures,
+                }
+            )
+        else:
+            status = "blocked" if any(bool(f.get("blocked")) for f in failures) else "failed"
+            _end_step(root, run_id, step_key, attempt, status, error=error_payload)
+            results.append(
+                {
+                    "step_key": step_key,
+                    "status": status,
+                    "datasets": list(datasets),
+                    "source_ids": [],
+                    "failures": failures,
+                    "error": error_payload,
+                }
+            )
+    return results
+
+
 def collect(
     root: Path,
     run_id: str,
@@ -1106,6 +1424,8 @@ def collect(
     *,
     market_provider: market.QuoteProvider | None = None,
     disclosure_provider: disclosures.DisclosureProvider | None = None,
+    fundamentals_provider: futu_fundamentals.FundamentalsProvider | None = None,
+    on_progress: progress.ProgressCallback | None = None,
 ) -> tuple[dict[str, object], list[ValidationIssue]]:
     """采集行情/财务/公告，写入 run_steps 与来源；不生成评分、不 finish。"""
     storage.initialize(root)
@@ -1115,8 +1435,16 @@ def collect(
         raise ResearchError("run_completed", "已完成的研究不能继续 collect", exit_code=2)
     ticker = str(run["ticker"])
     results: list[dict[str, object]] = []
+    progress.emit(
+        on_progress,
+        "collect",
+        "started",
+        f"开始采集 {ticker}（{kind}）",
+        run_id=run_id,
+    )
 
     if kind in {"all", "market"}:
+        progress.emit(on_progress, "collect.market", "started", "正在采集行情和财务数据", run_id=run_id)
         provider = market_provider
         if provider is None:
             try:
@@ -1135,8 +1463,44 @@ def collect(
                 results.extend(_collect_market(root, run, provider))
             finally:
                 provider.close()
+        progress.emit(on_progress, "collect.market", "completed", "行情和财务数据采集完成", run_id=run_id)
+
+    if kind in {"all", "fundamentals"}:
+        progress.emit(
+            on_progress,
+            "collect.fundamentals",
+            "started",
+            "正在采集基本面数据",
+            run_id=run_id,
+        )
+        provider = fundamentals_provider
+        if provider is None:
+            try:
+                provider = futu_fundamentals.make_provider()
+            except sources.SourceError as error:
+                payload = _error_payload(error)
+                for step_key, _datasets in FUNDAMENTAL_TASKS:
+                    attempt = _begin_step(
+                        root, run_id, step_key, "futu", _input_hash({"ticker": ticker, "step": step_key})
+                    )
+                    _end_step(root, run_id, step_key, attempt, "blocked", error=payload)
+                    results.append({"step_key": step_key, "status": "blocked", "error": payload})
+                provider = None
+        if provider is not None:
+            try:
+                results.extend(_collect_fundamentals(root, run, provider))
+            finally:
+                provider.close()
+        progress.emit(
+            on_progress,
+            "collect.fundamentals",
+            "completed",
+            "基本面数据采集完成",
+            run_id=run_id,
+        )
 
     if kind in {"all", "filings"}:
+        progress.emit(on_progress, "collect.filings", "started", "正在发现和归档公告", run_id=run_id)
         provider = disclosure_provider
         if provider is None:
             try:
@@ -1156,6 +1520,7 @@ def collect(
                 close = getattr(provider, "close", None)
                 if callable(close):
                     close()
+        progress.emit(on_progress, "collect.filings", "completed", "公告发现和归档完成", run_id=run_id)
 
     issues: list[ValidationIssue] = []
     for result in results:
@@ -1179,6 +1544,15 @@ def collect(
                     severity="warning",
                 )
             )
+        for failure in result.get("failures", []) or []:
+            issues.append(
+                ValidationIssue(
+                    "collect_dataset_failed",
+                    f"collect.{result['step_key']}",
+                    f"{result['step_key']} 数据集失败：{failure.get('message', '')}",
+                    severity="warning" if failure.get("blocked") else "error",
+                )
+            )
 
     succeeded = sum(1 for result in results if result.get("status") == "succeeded")
     failed = sum(1 for result in results if result.get("status") == "failed")
@@ -1192,6 +1566,13 @@ def collect(
         "failed": failed,
         "blocked": blocked,
     }
+    progress.emit(
+        on_progress,
+        "collect",
+        "succeeded" if succeeded else "blocked",
+        f"采集结束：成功 {succeeded}，失败 {failed}，阻塞 {blocked}",
+        run_id=run_id,
+    )
     return data, issues
 
 

@@ -206,6 +206,217 @@ class ResearchPacket(StrictModel):
     sources: list[Source]
 
 
+class ReviewIssue(StrictModel):
+    category: Literal[
+        "question_alignment",
+        "evidence_support",
+        "numeric_consistency",
+        "cross_section_consistency",
+        "scope_violation",
+    ]
+    target: str = Field(min_length=1)
+    severity: Literal["error", "warning"]
+    message: str = Field(min_length=1)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    revision_instruction: str = Field(min_length=1)
+
+
+class DraftReview(StrictModel):
+    """可持久化的语义审查结论；不包含模型隐藏推理。"""
+
+    draft_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["passed", "failed"]
+    checked_questions: list[str]
+    checked_gates: list[str]
+    checked_moats: list[str]
+    issues: list[ReviewIssue]
+
+    @model_validator(mode="after")
+    def errors_imply_failed(self) -> DraftReview:
+        has_error = any(issue.severity == "error" for issue in self.issues)
+        if has_error and self.status != "failed":
+            raise ValueError("存在 error 时 status 必须为 failed")
+        if not has_error and self.status != "passed":
+            raise ValueError("没有 error 时 status 必须为 passed")
+        return self
+
+
+class InteractiveQuestion(StrictModel):
+    """交互 Agent 的一次问题；不代表正式 ResearchDraft。"""
+
+    question: str = Field(min_length=1, max_length=12000)
+    focus: Literal[
+        "general",
+        "challenge",
+        "macro",
+        "peer",
+        "capacity_cycle",
+        "inventory_cycle",
+    ] = "general"
+    context: Literal["latest_completed_report", "latest_run", "sources", "memos"] = (
+        "latest_completed_report"
+    )
+    run_id: str | None = None
+    allow_network: bool = False
+    max_iterations: int = Field(default=6, ge=1, le=10)
+    token_budget: int = Field(default=12000, ge=256, le=50000)
+
+
+class RoutePlan(StrictModel):
+    """自然语言入口的受控路由结果；不直接代表可执行权限。"""
+
+    intent: Literal[
+        "fixed_research",
+        "interactive_question",
+        "memo_save",
+        "session_followup",
+        "status_query",
+        "clarify",
+        "unsupported",
+    ]
+    company_name: str | None = None
+    ticker: str | None = None
+    question: str | None = None
+    focus: Literal[
+        "general",
+        "challenge",
+        "macro",
+        "peer",
+        "capacity_cycle",
+        "inventory_cycle",
+    ] = "general"
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(min_length=1, max_length=1000)
+    requires_confirmation: bool = True
+
+    @field_validator("ticker")
+    @classmethod
+    def ticker_is_valid_when_present(cls, ticker: str | None) -> str | None:
+        if ticker is None:
+            return None
+        return validate_ticker(ticker)
+
+    @field_validator("focus", mode="before")
+    @classmethod
+    def null_focus_means_general(cls, focus: str | None) -> str:
+        """兼容模型把没有专项方向的请求显式写成 null。"""
+        return "general" if focus is None else focus
+
+
+class SymbolCandidate(StrictModel):
+    """自然语言标的消歧候选；不是研究证据，也不代表用户已选择。"""
+
+    candidate_id: str = Field(min_length=1)
+    ticker: str
+    name: str = Field(min_length=1)
+    market: Literal["HK", "US"]
+    security_type: str = Field(min_length=1)
+    source: Literal["local", "futu", "model_suggestion"]
+    verified: bool
+
+    @field_validator("ticker")
+    @classmethod
+    def ticker_is_supported(cls, ticker: str) -> str:
+        return validate_ticker(ticker)
+
+
+class InteractiveFollowup(StrictModel):
+    question: str = Field(min_length=1, max_length=12000)
+
+
+class InteractiveClaim(StrictModel):
+    text: str = Field(min_length=1)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+
+
+class InteractiveReport(StrictModel):
+    """Agent 的临时研究结果；不会自动进入正式研究报告。"""
+
+    session_id: UUID4
+    ticker: str
+    user_question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    claims: list[InteractiveClaim] = Field(default_factory=list)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    counterarguments: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    suggested_next_checks: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+    @field_validator("ticker")
+    @classmethod
+    def ticker_is_supported_or_synthetic(cls, ticker: str) -> str:
+        return validate_ticker(ticker)
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("created_at 必须带时区")
+        return value
+
+
+class AgentDecision(StrictModel):
+    """DeepSeek 交互循环的有限 JSON 协议。"""
+
+    type: Literal["tool_call", "final", "ask_user"]
+    tool: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    answer: str | None = None
+    claims: list[InteractiveClaim] = Field(default_factory=list)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    counterarguments: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    suggested_next_checks: list[str] = Field(default_factory=list)
+    question: str | None = None
+
+    @model_validator(mode="after")
+    def decision_shape_is_consistent(self) -> AgentDecision:
+        if self.type == "tool_call" and not self.tool:
+            raise ValueError("tool_call 必须提供 tool")
+        if self.type == "final" and not self.answer:
+            raise ValueError("final 必须提供 answer")
+        if self.type == "ask_user" and not self.question:
+            raise ValueError("ask_user 必须提供 question")
+        return self
+
+
+class MemoRequest(StrictModel):
+    """用户明确选择保存到公司 Memo 的内容。"""
+
+    title: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1, max_length=30000)
+    source_refs: list[EvidenceRef] = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CompanyMemo(StrictModel):
+    """公司级长期备忘录；不是正式报告，也不直接参与评分。"""
+
+    memo_id: UUID4
+    ticker: str
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    source_refs: list[EvidenceRef] = Field(min_length=1)
+    created_from_session: UUID4
+    tags: list[str] = Field(default_factory=list)
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("ticker")
+    @classmethod
+    def ticker_is_supported_or_synthetic(cls, ticker: str) -> str:
+        return validate_ticker(ticker)
+
+    @model_validator(mode="after")
+    def memo_times_have_timezone(self) -> CompanyMemo:
+        for value in (self.created_at, self.updated_at):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("Memo 时间必须带时区")
+        return self
+
+
 def source_id_text(source_id: UUID | str) -> str:
     """为校验和报告提供稳定的小写 UUID 文本。"""
     return str(source_id)

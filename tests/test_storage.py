@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import research, storage
+from wonder_stockresearch import cli, research, storage
 from wonder_stockresearch.cli import main
 from wonder_stockresearch.models import ResearchPacket
 from wonder_stockresearch.research import ResearchError
@@ -187,3 +187,70 @@ def test_cli_watch_start_save_status_finish(tmp_path: Path, capsys: object) -> N
 
     assert main(["--root", str(root), "history", "SYNTHETIC"]) == 0
     assert len(json.loads(capsys.readouterr().out)["data"]["runs"]) == 1
+
+
+def test_tty_finish_prints_paths_and_retry_summary_without_raw_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = tmp_path / "workspace with spaces"
+    outer.mkdir()
+    root = make_root(outer)
+    run_id = completed_run(root, "SYNTHETIC")
+    # The second finish is the normal idempotent retry and omits derived fields.
+    research.finish_run(root, run_id)
+
+    class TerminalOutput:
+        def __init__(self) -> None:
+            self.value = ""
+
+        def isatty(self) -> bool:
+            return True
+
+        def write(self, value: str) -> int:
+            self.value += value
+            return len(value)
+
+        def flush(self) -> None:
+            return None
+
+    terminal = TerminalOutput()
+    monkeypatch.setattr(cli.sys, "stdout", terminal)
+
+    assert main(["--root", str(root), "finish", run_id]) == 0
+
+    run_dir = next((root / "data" / "stocks" / "SYNTHETIC" / "runs").iterdir()).resolve()
+    assert "正式报告已完成并冻结" in terminal.value
+    assert "护城河总分：未评估 / 60" in terminal.value
+    assert f"运行目录：{run_dir}" in terminal.value
+    assert f"报告：{run_dir / 'company.md'}" in terminal.value
+    assert f"结构化数据：{run_dir / 'research.json'}" in terminal.value
+    assert "复评报告：" not in terminal.value
+    assert "session_id" not in terminal.value
+    assert '"run_id"' not in terminal.value
+
+
+def test_finish_summary_handles_optional_review_and_null_score(tmp_path: Path) -> None:
+    outer = tmp_path / "report folder with spaces"
+    outer.mkdir()
+    root = make_root(outer)
+    run_dir = root / "data" / "stocks" / "SYNTHETIC" / "runs" / "sample run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "company.md").write_text("report", encoding="utf-8")
+    (run_dir / "research.json").write_text("{}", encoding="utf-8")
+    result: dict[str, object] = {
+        "status": "completed",
+        "run_dir": str(run_dir.relative_to(root)),
+        "score_total": None,
+        "quality_status": "evidence_incomplete",
+    }
+
+    without_review = cli._finish_summary(root, result)
+    assert "质量：证据不完整" in without_review
+    assert "护城河总分：未评估 / 60" in without_review
+    assert "复评报告：" not in without_review
+    assert str(run_dir.resolve()) in without_review
+
+    review_path = run_dir / "review.md"
+    review_path.write_text("review", encoding="utf-8")
+    with_review = cli._finish_summary(root, result)
+    assert f"复评报告：{review_path.resolve()}" in with_review

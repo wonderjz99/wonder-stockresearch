@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -19,9 +20,13 @@ HKEX_BASE = "https://www1.hkexnews.hk"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 HONG_KONG = timezone(timedelta(hours=8))
-DEFAULT_LOOKBACK_YEARS = 3
-MAX_ANNUAL_REPORTS = 3
-MAX_CANDIDATES = 20
+DEFAULT_LOOKBACK_YEARS = 5
+MAX_ANNUAL_REPORTS = 5
+MAX_INTERIM_REPORTS = 3
+# The official HKEX search can return many results announcements among the
+# periodic reports. Keep a wide discovery window so older annual/interim PDFs
+# are not crowded out before select_filings applies the role limits.
+MAX_CANDIDATES = 200
 RELEVANT_CATEGORIES = {"annual", "interim", "quarterly", "results"}
 
 _ANNUAL_MARKERS = ("ANNUAL REPORT", "年報", "年报")
@@ -58,12 +63,18 @@ class DisclosureProvider:
 
 
 def classify_title(title: str) -> str:
-    upper = title.upper()
-    if any(marker in upper for marker in _ANNUAL_MARKERS):
+    upper = title.upper().strip()
+    # HKEX search also returns notices that merely mention an annual/interim
+    # report. Only classify a document as a periodic report when the title
+    # itself begins with the report name (optionally preceded by a list number
+    # and fiscal year), so a governance notice cannot displace the real report.
+    normalized = re.sub(r"^(?:\(\s*\d+\s*\)|\d+[.)])\s*", "", upper)
+    normalized = re.sub(r"^20\d{2}\s*", "", normalized)
+    if any(normalized.startswith(marker.upper()) for marker in _ANNUAL_MARKERS):
         return "annual"
-    if any(marker in upper for marker in _INTERIM_MARKERS):
+    if any(normalized.startswith(marker.upper()) for marker in _INTERIM_MARKERS):
         return "interim"
-    if any(marker in upper for marker in _QUARTERLY_MARKERS):
+    if any(normalized.startswith(marker.upper()) for marker in _QUARTERLY_MARKERS):
         return "quarterly"
     if any(marker in upper for marker in _RESULTS_MARKERS):
         return "results"
@@ -71,9 +82,12 @@ def classify_title(title: str) -> str:
 
 
 def select_filings(
-    candidates: list[FilingCandidate], *, max_annual: int = MAX_ANNUAL_REPORTS
+    candidates: list[FilingCandidate],
+    *,
+    max_annual: int = MAX_ANNUAL_REPORTS,
+    max_interim: int = MAX_INTERIM_REPORTS,
 ) -> list[dict[str, Any]]:
-    """选取最近 max_annual 份年报和最新一期中期/季度报告，保留角色标签。"""
+    """选取最近若干年报与中期/季度报告，保留角色标签。"""
 
     def sort_key(candidate: FilingCandidate) -> datetime:
         return candidate.published_at or datetime.min.replace(tzinfo=UTC)
@@ -81,15 +95,15 @@ def select_filings(
     annual = sorted(
         (c for c in candidates if c.category == "annual"), key=sort_key, reverse=True
     )[:max_annual]
-    latest_period = sorted(
+    recent_periods = sorted(
         (c for c in candidates if c.category in {"interim", "quarterly"}),
         key=sort_key,
         reverse=True,
-    )[:1]
+    )[:max_interim]
     selected: list[dict[str, Any]] = []
     for candidate in annual:
         selected.append({"role": "annual", **candidate.to_dict()})
-    for candidate in latest_period:
+    for candidate in recent_periods:
         selected.append({"role": candidate.category, **candidate.to_dict()})
     return selected
 

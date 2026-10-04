@@ -18,3 +18,15 @@
 - HKEX：[披露入口](https://www.hkexnews.hk/)。2026-09-20 实测官方检索 `https://www1.hkexnews.hk/search/prefix.do`（查 stockId）与 `titleSearchServlet.do`（公告列表）返回真实数据。公司 IR 使用各公司正式网站。
 
 这些外部链接是出处与实施核对入口，不是本地规格缺失内容的替代品。
+
+## 交互 Agent 参考
+
+用户指定的 Dexter 项目用于阶段 8–10 的交互 Agent 设计参考：
+
+- [Dexter GitHub](https://github.com/virattt/dexter)
+- [Agent loop](https://github.com/virattt/dexter/blob/main/src/agent/agent.ts)
+- [Tool registry](https://github.com/virattt/dexter/blob/main/src/tools/registry.ts)
+- [Skills registry](https://github.com/virattt/dexter/blob/main/src/skills/registry.ts)
+- [Scratchpad](https://github.com/virattt/dexter/blob/main/src/agent/scratchpad.ts)
+
+本项目只借鉴有限循环、工具注册、Skill 元数据、预算和调用轨迹，不复制 Dexter 的 Bun/TypeScript 技术栈，也不复制其开放网络、筛选、估值或交易能力。正式报告、InteractiveReport 和 Memo 的边界由本项目规格定义。

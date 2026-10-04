@@ -106,13 +106,31 @@ def candidate(title: str, url: str, published_at: datetime, category: str) -> Fi
     )
 
 
+def test_classify_title_requires_a_periodic_report_title_not_a_mention() -> None:
+    assert disclosures.classify_title("Annual Report 2021") == "annual"
+    assert disclosures.classify_title("2021 Annual Report") == "annual"
+    assert disclosures.classify_title("中期报告 2025") == "interim"
+    assert (
+        disclosures.classify_title(
+            "(1) RESIGNATION OF EXECUTIVE DIRECTOR; UPDATES ON REPORT OF DIRECTORS IN 2021 ANNUAL REPORT"
+        )
+        == "other"
+    )
+    assert disclosures.classify_title("Announcement of Annual Results for 2025") == "results"
+
+
 def filings_candidates() -> list[FilingCandidate]:
     return [
         candidate("ANNUAL REPORT 2025", "https://hk.example/a2025.pdf", datetime(2026, 4, 1, tzinfo=UTC), "annual"),
         candidate("ANNUAL REPORT 2024", "https://hk.example/a2024.pdf", datetime(2025, 4, 1, tzinfo=UTC), "annual"),
         candidate("ANNUAL REPORT 2023", "https://hk.example/a2023.pdf", datetime(2024, 4, 1, tzinfo=UTC), "annual"),
         candidate("ANNUAL REPORT 2022", "https://hk.example/a2022.pdf", datetime(2023, 4, 1, tzinfo=UTC), "annual"),
+        candidate("ANNUAL REPORT 2021", "https://hk.example/a2021.pdf", datetime(2022, 4, 1, tzinfo=UTC), "annual"),
+        candidate("ANNUAL REPORT 2020", "https://hk.example/a2020.pdf", datetime(2021, 4, 1, tzinfo=UTC), "annual"),
         candidate("INTERIM REPORT 2026", "https://hk.example/i2026.pdf", datetime(2026, 8, 20, tzinfo=UTC), "interim"),
+        candidate("INTERIM REPORT 2025", "https://hk.example/i2025.pdf", datetime(2025, 8, 20, tzinfo=UTC), "interim"),
+        candidate("INTERIM REPORT 2024", "https://hk.example/i2024.pdf", datetime(2024, 8, 20, tzinfo=UTC), "interim"),
+        candidate("INTERIM REPORT 2023", "https://hk.example/i2023.pdf", datetime(2023, 8, 20, tzinfo=UTC), "interim"),
         candidate("MONTHLY RETURN", "https://hk.example/m.pdf", datetime(2026, 9, 1, tzinfo=UTC), "other"),
     ]
 
@@ -225,15 +243,25 @@ def test_collect_filings_selects_latest_reports_and_downloads(
     assert issues == []
     step = data["steps"][0]
     assert step["status"] == "succeeded"
-    assert step["candidate_count"] == 6
-    assert step["selected_count"] == 4
-    assert len(step["downloaded"]) == 4
+    assert step["candidate_count"] == 11
+    assert step["selected_count"] == 8
+    assert len(step["downloaded"]) == 8
     listed = research.list_sources(root, run_id)["sources"]
-    assert len(listed) == 5
+    assert len(listed) == 9
     assert any(source["kind"] == "secondary" for source in listed)
     titles = {source["title"] for source in listed if source["kind"] == "primary"}
-    assert "ANNUAL REPORT 2025" in titles and "INTERIM REPORT 2026" in titles
-    assert "ANNUAL REPORT 2022" not in titles
+    assert {
+        "ANNUAL REPORT 2025",
+        "ANNUAL REPORT 2024",
+        "ANNUAL REPORT 2023",
+        "ANNUAL REPORT 2022",
+        "ANNUAL REPORT 2021",
+        "INTERIM REPORT 2026",
+        "INTERIM REPORT 2025",
+        "INTERIM REPORT 2024",
+    } <= titles
+    assert "ANNUAL REPORT 2020" not in titles
+    assert "INTERIM REPORT 2023" not in titles
 
 
 def test_collect_filings_partial_download_failure_is_reported(
@@ -267,7 +295,11 @@ def test_collect_filings_all_downloads_failing_marks_step_failed(
         "https://hk.example/a2025.pdf",
         "https://hk.example/a2024.pdf",
         "https://hk.example/a2023.pdf",
+        "https://hk.example/a2022.pdf",
+        "https://hk.example/a2021.pdf",
         "https://hk.example/i2026.pdf",
+        "https://hk.example/i2025.pdf",
+        "https://hk.example/i2024.pdf",
     }
     monkeypatch.setattr(sources, "fetch_url", fake_fetch(selected_urls))
 

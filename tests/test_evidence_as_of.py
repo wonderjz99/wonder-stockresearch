@@ -196,7 +196,9 @@ def test_save_draft_merges_sources_already_linked_to_run(tmp_path: Path) -> None
     _, issues = research.save_draft(root, run_id, ResearchPacket.model_validate(data))
 
     assert issues == []
-    assert research.validate_run(root, run_id) == []
+    assert {issue.code for issue in research.validate_run(root, run_id)} == {
+        "semantic_review_missing"
+    }
 
 
 def test_save_draft_still_flags_truly_unknown_source(tmp_path: Path) -> None:

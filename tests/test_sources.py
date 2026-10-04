@@ -191,7 +191,9 @@ def test_validate_requires_archived_bytes_for_stock_sources(tmp_path: Path) -> N
     _replace_source_ids(data["draft"], str(archived.id))
     data["sources"] = [json.loads(archived.model_dump_json())]
     research.save_draft(root, run_id, ResearchPacket.model_validate(data))
-    assert research.validate_run(root, run_id) == []
+    assert {issue.code for issue in research.validate_run(root, run_id)} == {
+        "semantic_review_missing"
+    }
 
     (root / archived.raw_path).unlink()
     codes = {issue.code for issue in research.validate_run(root, run_id)}

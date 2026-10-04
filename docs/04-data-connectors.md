@@ -4,8 +4,8 @@
 
 前三阶段的数据都由用户手动提供。这一阶段让程序自己取得两类真实资料：
 
-1. **行情与财务**（富途 OpenD，只读）——个股快照，以及年报口径的利润表、资产负债表、现金流量表、关键指标。
-2. **公告与定期报告**（港交所 HKEXnews / 美国 SEC EDGAR 公开渠道）——发现并归档最近 3 份年报和最新一期中期/季度报告。
+1. **行情与财务**（富途 OpenD，只读）——个股快照，以及最多 10 个年度期间的利润表、资产负债表、现金流量表、关键指标；主营构成尽可能归档最多 10 个年报期和最近 3 个中报期。
+2. **公告与定期报告**（港交所 HKEXnews / 美国 SEC EDGAR 公开渠道）——默认回看 5 年，归档最近 5 份年报和最近 3 份中期/季度定期报告。
 
 同时加入一张轻量运行步骤账本 `run_steps`，给每个采集子任务记录 attempt、状态、输入哈希、输出来源、provider 和错误。它是 `runs` 的执行明细，不是事件溯源或通用任务队列。
 
@@ -31,7 +31,7 @@ research.collect()
 
 - `src/wonder_stockresearch/storage.py`：`SCHEMA_VERSION = 2`，新增 `run_steps` 表与 `_MIGRATIONS`（v1→v2 显式迁移），以及 `next_step_attempt`/`insert_step`/`finish_step`/`list_steps`。
 - `src/wonder_stockresearch/market.py`（新）：`FutuQuoteProvider`，惰性 import `futu`，`SysConfig.enable_console_log(False)` 防止 SDK 日志污染 stdout，先做 2 秒 TCP 端口探测再连接，只调用 `OpenQuoteContext` 的 `get_market_snapshot` 与 `get_financials_statements`，**不导入任何账户/交易接口**。
-- `src/wonder_stockresearch/disclosures.py`（新）：`HkexDisclosureProvider`（`prefix.do` 查 stockId，`titleSearchServlet.do` 取公告，`rowRange=1000` 后过滤到 ≤20 条相关候选）、`SecDisclosureProvider`（EDGAR submissions，需 `WONDER_SEC_USER_AGENT`）、`classify_title`/`select_filings`。
+- `src/wonder_stockresearch/disclosures.py`：`HkexDisclosureProvider`（`prefix.do` 查 stockId，`titleSearchServlet.do` 取公告并保留最多 200 条相关候选）、`SecDisclosureProvider`（EDGAR submissions，需 `WONDER_SEC_USER_AGENT`）、`classify_title`/`select_filings`。当前默认回看 5 年并选取最近 5 份年报 + 3 份中期/季度报告。
 - `src/wonder_stockresearch/research.py`：抽出 `_register_source`（归档+登记，`source_add` 与 `collect` 共用）；新增 `_begin_step`/`_end_step`、`_collect_market`、`_collect_filings`、`collect`；`get_status` 增加 `steps`。
 - `src/wonder_stockresearch/cli.py`：新增 `collect RUN_ID [--kind all|market|filings]`。
 - `pyproject.toml`：新增 `futu-api==10.11.7108`。
@@ -72,7 +72,7 @@ source-read --page 2 → locator="page 2"，total_pages=251
 ## 5. 为什么这样实现
 
 - **领域核心仍是函数**：采集只是把外部数据变成 `sources` 与 `run_steps`；评分、校验、`finish` 完全不变，模型或未来的 Agent 无法借此改数据库或总分。
-- **只读、不碰账户**：仅使用行情上下文；不调用任何账户、持仓、资金、订单或交易接口；OpenD 登录由宿主在项目外管理，本项目不读取账户秘密。
+- **只读、不碰账户**：仅使用行情上下文；不调用任何账户、持仓、资金、订单或交易接口；用户独立启动并登录本机 OpenD，本项目仅连接行情端口，不读取或保存账户秘密。
 - **时间两把尺**：`retrieved_at` 是取得时间，`observed_at` 是数据观测时间，二者都写进 provider 来源；若 `observed_at` 晚于 run 的 `as_of`，metadata 记 `observed_after_as_of=true`，只作本次下载结果，不悄悄前移研究截止时点。
 - **保留原始口径，不猜单位**：财务来源原样保存 `period_text/date_time_str/fiscal_year/financial_type/currency_code/accounting_standards` 和 `item_list(field_id/display_name/data)`；futu 未给 item 级单位，程序就标注 `unit_note`，不推断单位，也不按列表下标拼财年。
 - **失败可解释**：网络/接口错误写 `run_steps.error_json` 并入 `issues`；`opend_unavailable`/`sec_user_agent_missing` 记为 `blocked`（warning），真实错误记为 `failed`（error）。`collect` 只在至少一个子任务成功时退出 0。
@@ -83,7 +83,7 @@ source-read --page 2 → locator="page 2"，total_pages=251
 
 `tests/test_run_steps.py`：v1 数据库经 `initialize` 迁移到 v2、旧数据保留、attempt 递增、步骤状态进入 `status`。
 
-`tests/test_collect.py`：行情/财务来源归档与步骤记录、财务期间/币种/会计口径/字段/endpoint 保留、provider 超时记为 `failed` 且不伪装成空成功、OpenD 不可用记为 `blocked`、公告选取最新 3 年报+最新中报、部分下载失败与全部失败、空结果单独记录、SEC 缺 User-Agent、市场路由、CLI `collect` 接线。
+`tests/test_collect.py`：行情/财务来源归档与步骤记录、财务期间/币种/会计口径/字段/endpoint 保留、provider 超时记为 `failed` 且不伪装成空成功、OpenD 不可用记为 `blocked`、公告选取最近 5 年报 + 3 份中期/季度报告、部分下载失败与全部失败、空结果单独记录、SEC 缺 User-Agent、市场路由、CLI `collect` 接线。
 
 这些测试**不能**证明：Provider 数据一定完整或正确、公告发现覆盖所有文件、SEC 通道在当前环境可用、公司判断正确或证券值得投资。Fixture 测试全部离线，唯一的真实请求是实施时记录的 smoke（HKEX 下载、Futu 快照/财务、`source-read` 翻页）。
 
@@ -95,7 +95,7 @@ source-read --page 2 → locator="page 2"，total_pages=251
 
 ## 8. 已知限制与下一阶段
 
-- 富途财务只取 ANNUAL 口径、每类型最多 10 期；关键指标币种可能与报表不同（实测为 HKD）；item 级单位 futu 未提供，保留原值不推断。
+- 富途三大表与关键指标取 ANNUAL 口径、每类最多 10 期；主营构成按接口历史期保存最多 10 个年度期与最近 3 个中报期。覆盖以实际 `period_text/date_time_str` 为准，不能只以请求条数推断连续年数；关键指标币种可能与报表不同（实测为 HKD）；item 级单位 futu 未提供，保留原值不推断。
 - 公告发现按英文标题分类，中文/双语标题与“业绩公告”等更细分类仍在候选层，未做全文解析。
 - SEC 通道需 `WONDER_SEC_USER_AGENT`，本环境未配置，标 `blocked`；未对真实美股做端到端 smoke。
-- 不做 OCR、不执行网页脚本；不做模型写作（可选后续 writer）、估值、附记正文或 OpenCode skill（阶段 5）。
+- 不做 OCR、不执行网页脚本；不做模型写作、估值或附记正文。项目不依赖 OpenCode 或外部宿主。

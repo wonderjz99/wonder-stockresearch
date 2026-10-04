@@ -26,6 +26,8 @@ FINANCIAL_STATEMENT_TYPES = {1: "利润表", 2: "资产负债表", 3: "现金流
 class QuoteProvider(Protocol):
     name: str
 
+    def search_quotes(self, keyword: str, max_count: int = 10) -> list[dict[str, Any]]: ...
+
     def market_snapshot(self, ticker: str) -> dict[str, Any]: ...
 
     def financial_statements(self, ticker: str) -> dict[str, Any]: ...
@@ -126,6 +128,29 @@ class FutuQuoteProvider:
             "endpoint": "OpenQuoteContext.get_market_snapshot",
             "records": _records(data),
         }
+
+    def search_quotes(self, keyword: str, max_count: int = 10) -> list[dict[str, Any]]:
+        """按名称/代码搜索标的；只保留搜索结果，不读取用户自选状态。"""
+        from futu import RET_OK
+
+        if not keyword.strip():
+            raise SourceError("empty_symbol_query", "标的搜索词不能为空", exit_code=2)
+        if max_count < 1:
+            raise SourceError("invalid_symbol_limit", "标的搜索数量必须大于 0", exit_code=2)
+        ret, data = self._ctx().get_search_quote(keyword.strip(), max_count=max_count)
+        if ret != RET_OK:
+            raise SourceError("search_quote_failed", f"get_search_quote 失败：{data}")
+        records = _records(data)
+        # Futu 返回的 is_watched 是用户侧状态；候选解析明确不读取或保存它。
+        return [
+            {
+                "market": item.get("market"),
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "sec_type": item.get("sec_type"),
+            }
+            for item in records
+        ]
 
     def financial_statements(self, ticker: str) -> dict[str, Any]:
         from futu import RET_OK
