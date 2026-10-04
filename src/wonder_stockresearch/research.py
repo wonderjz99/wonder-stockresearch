@@ -450,6 +450,29 @@ def start_run(
     }
 
 
+def record_skill_selection(
+    root: Path, run_id: str, selected_skills: list[dict[str, object]]
+) -> dict[str, object]:
+    """把实际加载的 Skill 元数据写入 run_steps，不保存正文或 references。"""
+    if not selected_skills:
+        return {"run_id": run_id, "skills": []}
+    storage.initialize(root)
+    with storage.open_db(root) as connection:
+        _require_run(connection, run_id)
+    input_hash = _input_hash({"skills": selected_skills})
+    attempt = _begin_step(root, run_id, "skill_selection", "skill_registry", input_hash)
+    _end_step(
+        root,
+        run_id,
+        "skill_selection",
+        attempt,
+        "succeeded",
+        output_ref="skill_selection",
+        metadata={"skills": selected_skills},
+    )
+    return {"run_id": run_id, "skills": selected_skills}
+
+
 def _effective_sources(
     connection: object, run_id: str, packet_sources: list[Source]
 ) -> list[Source]:

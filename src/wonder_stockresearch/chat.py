@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import agent, progress, research, router, storage, symbols, writer
+from . import agent, progress, research, router, skill_registry, storage, symbols, writer
 from .models import InteractiveQuestion, RoutePlan, SymbolCandidate, validate_ticker
 
 
@@ -69,6 +69,7 @@ def _update(
 
 
 def _new_session(root: Path, text: str, plan: RoutePlan | None = None) -> str:
+    storage.initialize(root)
     session_id = str(uuid4())
     history = [{"role": "user", "content": text}]
     pending = {"action": "route", "plan": plan.model_dump(mode="json")} if plan else None
@@ -269,6 +270,46 @@ def _selected_symbol(
     }
 
 
+def _load_execution_skills(
+    root: Path,
+    session_id: str,
+    row: dict[str, Any],
+    plan: RoutePlan,
+    *,
+    on_progress: progress.ProgressCallback | None,
+) -> tuple[dict[str, Any], tuple[skill_registry.LoadedSkill, ...]]:
+    """在执行边界才读 Skill 正文/资源，并把无正文的审计元数据写入 chat history。"""
+    capability_name = {
+        "fixed_research": "fixed_research",
+        "interactive_question": "interactive_research",
+    }.get(plan.intent)
+    try:
+        loaded = (
+            skill_registry.load_for_capability(root, plan.skill_names, capability_name)
+            if capability_name
+            else skill_registry.load_selected(root, plan.skill_names)
+        )
+    except skill_registry.SkillRegistryError as error:
+        raise ChatError(error.code, error.message, exit_code=2) from error
+    audit = skill_registry.selection_audit(loaded)
+    if not audit:
+        return row, ()
+    history_json = _append_history(
+        _history(row), "system", "Skill 执行加载：" + json.dumps(audit, ensure_ascii=False)
+    )
+    _update(root, session_id, history_json=history_json)
+    updated = dict(row)
+    updated["history_json"] = history_json
+    progress.emit(
+        on_progress,
+        "skills",
+        "succeeded",
+        "已按需加载 Skill：" + "、".join(item["name"] for item in audit),
+        session_id=session_id,
+    )
+    return updated, loaded
+
+
 def _execute_interactive(
     root: Path,
     session_id: str,
@@ -280,8 +321,17 @@ def _execute_interactive(
 ) -> dict[str, Any]:
     if not plan.ticker:
         raise ChatError("missing_ticker", "临时分析缺少股票代码", exit_code=2)
+    row, loaded = _load_execution_skills(root, session_id, row, plan, on_progress=on_progress)
     question = InteractiveQuestion(question=plan.question or "请分析这家公司", focus=plan.focus)
-    result = agent.ask(root, plan.ticker, question, model=model, on_progress=on_progress)
+    result = agent.ask(
+        root,
+        plan.ticker,
+        question,
+        model=model,
+        skill_context=skill_registry.execution_context(loaded),
+        skill_audit=skill_registry.selection_audit(loaded),
+        on_progress=on_progress,
+    )
     history = _history(row)
     history_json = _append_history(history, "assistant", json.dumps(result, ensure_ascii=False))
     agent_session_id = str(result.get("session_id")) if result.get("session_id") else None
@@ -313,9 +363,12 @@ def _execute_fixed(
             "status": "waiting_user",
             "question": "我没有可靠识别出股票代码，请提供股票代码，例如 HK.00941。",
         }
+    row, loaded = _load_execution_skills(root, session_id, row, plan, on_progress=on_progress)
     progress.emit(on_progress, "research", "started", f"开始正式研究：{plan.ticker}", run_id=None)
     started = research.start_run(root, plan.ticker)
     run_id = str(started["run_id"])
+    if loaded:
+        research.record_skill_selection(root, run_id, skill_registry.selection_audit(loaded))
     history = _history(row)
     history_json = _append_history(history, "system", f"已创建研究 run：{run_id}")
     _update(root, session_id, history_json=history_json, ticker=plan.ticker, run_id=run_id)

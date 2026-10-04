@@ -1,6 +1,6 @@
 # wonder-stockresearch 实施计划
 
-状态：阶段 1–15 已实现；阶段 16 的工程实现、离线测试和三家电信真实运行已完成。阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 Skill 按需加载尚未开始；开放问题临时计算和 Pi Agent Core 评估继续后置，不引入 LangGraph。
+状态：阶段 1–17 已实现；阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 已完成按需 Skill Catalog、Capability Registry、执行审计和 Writer/Agent 上下文加载；开放问题临时计算和 Pi Agent Core 评估继续后置，不引入 LangGraph。
 目标：在独立项目中，从零实现可追溯的单股公司研究与手动复评，每阶段提供可运行代码和中文讲解。
 
 ## 1. 已确认决策
@@ -165,7 +165,7 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 - schema v6 增加 `draft_sections` 与 `draft_reviews`；分组按输入哈希恢复，草稿改变使旧审查失效。
 - 新 standard run 的 `finish` 需要 matching passing review；完成后冻结 `quality-review.json`。schema v5 旧 run 不受影响。
 - 新增 `review-draft`、`--strategy staged|one-shot`，`status` 显示分组、预算、草稿哈希和审查状态。
-- 中国移动、联通、电信三份新 run 均覆盖 24 Q、6 Gate、6 Moat。移动和电信已通过当前自动审查、联通仍有语义 error；三份均未 finish，详见 [docs/13-fixed-research-quality.md](docs/13-fixed-research-quality.md) 和 `PROGRESS.md`。
+- 中国移动、联通、电信三份新 run 均覆盖 24 Q、6 Gate、6 Moat，并在阶段 16.1 重写后通过当前自动审查和 `validate`；三份均未 finish，详见 [docs/13-fixed-research-quality.md](docs/13-fixed-research-quality.md) 和 `PROGRESS.md`。
 
 ### 阶段 16.1：定向证据恢复（实施中，2026-10-01）
 
@@ -174,12 +174,13 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 - 从年报的明确当年 Capex 披露计算 Capex/收入，现金流购买资产仅作为单独标明的 proxy；三家电信均恢复 2021–2025 的比率序列。
 - 重写三份草稿并人工核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23；不自动 `finish`。完成后更新真实结果并暂停。
 
-### 阶段 17：Skill 按需加载（下一阶段，尚未开始）
+### 阶段 17：Skill 按需加载（已完成，2026-10-04）
 
 - 启动时只扫描 name/description/path/availability；Router 只接收摘要，选中后才加载正文与其声明的 references。
 - 方法 Skill 新增目录即可发现；能力 Skill 必须引用 Python Capability Registry 中显式注册的受控能力。
 - 新增 `skill-list`、`skill-check`、`start --skill`，记录 Skill 名称、版本和内容哈希；拒绝路径越界、重名、依赖循环和未知 capability。
-- 阶段 16 经用户验收后再实现，不与当前质量修复混在一起。
+- Router 只收到 name、description、path、kind、适用 capability 和可用性摘要；实际执行才加载正文/reference。固定 Writer 与交互 Agent 只保存名称、版本、内容哈希等审计摘要，不保存正文。
+- 当前能力为 `fixed_research`、`interactive_research` 和尚不可用的 `analysis_workspace`；后者只能由阶段 18 实现后启用。详见 `docs/14-skill-on-demand.md`。
 
 ### 阶段 18–20：开放问题临时计算与 Runtime 评估（长期）
 

@@ -288,6 +288,7 @@ class RoutePlan(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=1, max_length=1000)
     requires_confirmation: bool = True
+    skill_names: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("ticker")
     @classmethod
@@ -301,6 +302,16 @@ class RoutePlan(StrictModel):
     def null_focus_means_general(cls, focus: str | None) -> str:
         """兼容模型把没有专项方向的请求显式写成 null。"""
         return "general" if focus is None else focus
+
+    @field_validator("skill_names")
+    @classmethod
+    def selected_skills_are_unique(cls, names: list[str]) -> list[str]:
+        cleaned = [name.strip() for name in names]
+        if any(not name for name in cleaned):
+            raise ValueError("skill_names 不能包含空名称")
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("skill_names 不能重复")
+        return cleaned
 
 
 class SymbolCandidate(StrictModel):

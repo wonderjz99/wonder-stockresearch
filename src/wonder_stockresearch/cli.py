@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import agent, chat, envfile, progress, research, storage, writer
+from . import agent, chat, envfile, progress, research, skill_registry, storage, writer
 from .models import (
     DraftReview,
     InteractiveFollowup,
@@ -197,6 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("ticker")
     start.add_argument("--as-of", default=None, help="带时区的 ISO 时间；默认当前时间")
     start.add_argument("--baseline", default=None, help="同股票已完成的基准 run_id")
+    start.add_argument("--skill", action="append", default=[], help="选择一个可用 Skill；可重复指定")
+    subparsers.add_parser("skill-list", help="列出项目 Skill Catalog 和可用性")
+    skill_check = subparsers.add_parser("skill-check", help="检查一个 Skill 或全部 Skill 的 manifest、依赖和 capability")
+    skill_check.add_argument("name", nargs="?", default=None)
     status = subparsers.add_parser("status", help="查看 run 状态")
     status.add_argument("run_id")
     draft_read = subparsers.add_parser("draft-read", help="只读输出当前保存草稿 JSON")
@@ -471,6 +475,31 @@ def _run_chat(root: Path, args: argparse.Namespace) -> int:
 
 
 def _run_business(root: Path, args: argparse.Namespace) -> int:
+    if args.command == "skill-list":
+        _emit(True, skill_registry.catalog(root).to_dict(), [])
+        return 0
+    if args.command == "skill-check":
+        catalog = skill_registry.catalog(root)
+        if args.name is not None:
+            item = catalog.skills.get(args.name)
+            if item is None:
+                raise CommandError("unknown_skill", f"未发现 Skill：{args.name}", 2)
+            data: dict[str, object] = {"skill": item.to_dict()}
+            try:
+                resolved = skill_registry.resolve_selected(root, [args.name])
+                data["resolved"] = [item.to_dict() for item in resolved]
+            except skill_registry.SkillRegistryError as error:
+                data["resolution_error"] = {"code": error.code, "message": error.message}
+            _emit(item.available, data, [diagnostic.to_dict() for diagnostic in item.diagnostics])
+            return 0 if item.available else 2
+        issues = [diagnostic.to_dict() for diagnostic in catalog.diagnostics]
+        issues.extend(
+            diagnostic.to_dict()
+            for item in catalog.skills.values()
+            for diagnostic in item.diagnostics
+        )
+        _emit(not issues, catalog.to_dict(), issues)
+        return 0 if not issues else 2
     if args.command == "watch":
         if args.watch_command == "add":
             data = research.watch_add(root, args.ticker, args.name)
@@ -482,7 +511,15 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         return 0
     if args.command == "start":
         as_of = _parse_as_of(args.as_of) if args.as_of else None
+        try:
+            loaded = skill_registry.load_for_capability(root, list(args.skill), "fixed_research")
+        except skill_registry.SkillRegistryError as error:
+            raise CommandError(error.code, error.message, 2) from error
         data = research.start_run(root, args.ticker, as_of=as_of, baseline_run_id=args.baseline)
+        if loaded:
+            data["skill_selection"] = research.record_skill_selection(
+                root, str(data["run_id"]), skill_registry.selection_audit(loaded)
+            )
         _emit(True, data, [])
         return 0
     if args.command == "status":

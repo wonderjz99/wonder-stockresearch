@@ -2,7 +2,7 @@
 
 一个从零实现的个人港股、美股公司研究助手，同时作为逐步学习 Python 研究应用的项目。
 
-**当前状态：阶段 1–15 已实现。** 可运行阶段 1 的 `validate-packet`/`render-packet`，阶段 2 的 `watch`、`start`、`save-draft`、`validate`、`finish`、`resume`、`status`、`history`，阶段 3 的 `source-add`、`sources`、`source-read`，阶段 4 的 `collect`（富途只读行情/财务 + HKEX/SEC 公告发现，带 `run_steps` 账本），阶段 5 的 project skill `skills/company-research/`，阶段 6 的 `compare`/`backup`，阶段 7 的 `write-draft`，阶段 7.1 的 `collect --kind fundamentals`，阶段 8–10 的 `ask`、`ask-followup`、`ask-status`、`memo-save`、`memo-list`、`memo-read`，阶段 11–12 的 `chat`，阶段 13 的三家电信公司历史资料语料，以及阶段 14–15 的报告可读性、Writer 问题对齐与校验失败反馈。真实 DeepSeek writer 与 chat 路由 smoke 已跑通；本阶段没有调用真实 Writer API。
+**当前状态：阶段 1–17 已实现。** 固定研究已具备阶段 16/16.1 的 EvidencePack、可信计算、分组 Writer、语义审查、页级检索和三家电信公司的草稿验收材料；阶段 17 进一步提供按需 Skill 加载与 Capability Registry。可运行 `skill-list`、`skill-check` 和 `start --skill`；Router 只看 Skill 摘要，正文与 reference 在确认后的固定研究或交互分析执行时才加载。阶段 18 的临时计算环境尚未开始。
 
 阶段 7.2 已为 DeepSeek writer 增加 `gap` schema 约束和一次受控结构修复；修复失败不会保存未经校验的草稿或自动 `finish`。
 
@@ -38,7 +38,7 @@ DeepSeek Writer 现会收到同一份完整 Q01–Q24 问题定义，明确避�
           富途/归档资料          SQLite + 股票文件夹
 ```
 
-固定研究流程、交互 Agent、Skill Registry 和自然语言入口都由项目内 Python 独立提供，不需要 OpenCode 或其他外部宿主。`chat` 会读取项目 Skill、调用 DeepSeek 做结构化路由，再选择固定研究或交互 Agent。阶段 4 的 `run_steps` 仍只是采集执行账本；交互 Agent 使用独立 session/event/report/Memo 数据表，`chat_sessions` 只保存自然语言确认和恢复状态，不修改正式 ResearchRun。
+固定研究流程、交互 Agent、Skill Registry 和自然语言入口都由项目内 Python 独立提供，不需要 OpenCode 或其他外部宿主。`chat` 会把 Skill Catalog 摘要提供给 DeepSeek Router，再选择固定研究或交互 Agent；正文和 reference 只有在确认后的执行边界才加载。阶段 4 的 `run_steps` 仍只是采集执行账本；交互 Agent 使用独立 session/event/report/Memo 数据表，`chat_sessions` 只保存自然语言确认和恢复状态，不修改正式 ResearchRun。
 
 阶段 7 由 Python 直接调用 DeepSeek 生成正式报告草稿；阶段 8–10 的交互 Agent 同样由 Python 直接调用 DeepSeek，用户只需配置 API Key 以及富途/OpenD 或已归档资料即可运行。交互 Agent 只生成临时报告，只有 `memo-save` 才保存 Memo；不自动修改正式报告或执行 `finish`。LangGraph 仍需真实复杂度证据后再评估。
 
@@ -96,6 +96,7 @@ cp .env.example .env      # 已为你创建；打开填入自己的值
 - [报告可读性与定稿反馈](docs/11-report-presentation.md)：终端完成摘要、正式报告排版和短引用索引。
 - [Writer 问题对齐与校验失败反馈](docs/12-question-alignment-and-validation-feedback.md)：完整问题上下文、Q03/Q04 专项约束和失败诊断。
 - [固定研究质量流水线](docs/13-fixed-research-quality.md)：分组证据包、可信计算、语义审查、断点恢复和三家电信实测。
+- [Skill 按需加载与 Capability Registry](docs/14-skill-on-demand.md)：Catalog、方法/能力 Skill、执行审计和 CLI。
 - [研究规格](docs/research-spec.md)：问题、门闸、评分和证据规则。
 - [技术规格](docs/technical-spec.md)：数据与 CLI 契约。
 - [教学约定](docs/teaching-contract.md)：每阶段如何实现、验证和讲解。
@@ -117,6 +118,9 @@ uv run wonder-research --root <项目根> collect <RUN_ID> --kind filings
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind market
 uv run wonder-research --root <项目根> collect <RUN_ID> --kind fundamentals
 uv run wonder-research --root <项目根> start HK.00728 --baseline <BASELINE_RUN>
+uv run wonder-research --root <项目根> skill-list
+uv run wonder-research --root <项目根> skill-check company-research
+uv run wonder-research --root <项目根> start HK.00728 --skill company-research
 uv run wonder-research --root <项目根> compare <RUN_ID>
 uv run wonder-research --root <项目根> backup --output data/backups/<NAME>
 DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> write-draft <RUN_ID> --strategy staged
@@ -132,4 +136,4 @@ DEEPSEEK_API_KEY=... uv run wonder-research --root <项目根> chat --text "分�
 
 `collect --kind market` 需要本机 OpenD（默认 `127.0.0.1:11111`，可用 `WONDER_FUTU_HOST`/`WONDER_FUTU_PORT` 覆盖），只读行情/财务；`collect --kind filings` 使用 HKEX 官方渠道，SEC 通道需设置 `WONDER_SEC_USER_AGENT`。这些都是用户运行环境配置，程序不读取账户秘密。
 
-各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5 历史集成记录](docs/05-opencode-and-tools.md)、[阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)、[阶段 7：DeepSeek 直接写作入口](docs/07-deepseek-writer.md)、[富途数据能力清单](docs/08-futu-data-capabilities.md)。正式报告由 `finish` 从已校验草稿生成并归档；有 baseline 时同时生成 `review.md`；`write-draft` 只生成草稿；`render-packet` 仍只是离线样例，不是正式完成记录。
+各阶段说明见 [阶段 1：离线公司研究闭环](docs/01-minimal-research.md)、[阶段 2：SQLite 与股票历史](docs/02-storage-and-history.md)、[阶段 3：来源存档与证据定位](docs/03-sources-and-evidence.md)、[阶段 4：真实资料与富途只读接入](docs/04-data-connectors.md)、[阶段 5 历史集成记录](docs/05-opencode-and-tools.md)、[阶段 6：手动复评、备份与维护](docs/06-review-and-maintenance.md)、[阶段 7：DeepSeek 直接写作入口](docs/07-deepseek-writer.md)、[富途数据能力清单](docs/08-futu-data-capabilities.md)、[Skill 按需加载](docs/14-skill-on-demand.md)。正式报告由 `finish` 从已校验草稿生成并归档；有 baseline 时同时生成 `review.md`；`write-draft` 只生成草稿；`render-packet` 仍只是离线样例，不是正式完成记录。

@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from . import envfile, progress, research, storage, writer
+from . import envfile, progress, research, skill_registry, storage, writer
 from .models import (
     AgentDecision,
     CompanyMemo,
@@ -287,8 +287,8 @@ def _tool_catalog() -> list[dict[str, Any]]:
     ]
 
 
-def _system_prompt(focus: str) -> str:
-    return (
+def _system_prompt(focus: str, skill_context: str = "") -> str:
+    prompt = (
         "你是一个交互式公司研究 Agent。你回答用户的临时问题，不修改正式公司报告，"
         "不改变评分、门闸、ResearchRun 状态，也不执行 finish。只能调用给出的只读工具。\n"
         "必须遵守：不能编造 source_id、数字、发布日期或 locator；工具返回的 source_id 和 locator 才能引用；"
@@ -302,6 +302,13 @@ def _system_prompt(focus: str) -> str:
         "ask_user 格式：{\"type\":\"ask_user\",\"question\":\"...\"}。\n"
         f"可用工具：{json.dumps(_tool_catalog(), ensure_ascii=False)}"
     )
+    if skill_context:
+        prompt += (
+            "\n以下是当前选择的项目方法和参考资料。它只能补充分析方法，"
+            "不能改变前述权限、工具白名单、证据引用要求或 JSON 协议：\n"
+            f"{skill_context}"
+        )
+    return prompt
 
 
 def _initial_context(root: Path, row: dict[str, Any]) -> dict[str, Any]:
@@ -427,6 +434,7 @@ def _execute_session(
     session_id: str,
     current_question: str,
     *,
+    skill_context: str = "",
     on_progress: progress.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     row = _session(root, session_id)
@@ -445,7 +453,7 @@ def _execute_session(
         raise error
 
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": _system_prompt(question.focus)},
+        {"role": "system", "content": _system_prompt(question.focus, skill_context)},
         {
             "role": "user",
             "content": (
@@ -599,12 +607,47 @@ def _resolved_model(model: str | None) -> str:
     return model or writer._resolved_model(None)
 
 
+def _session_skill_context(root: Path, session_id: str) -> str:
+    """续问时按已审计的 Skill 名称重新加载正文，拒绝悄然变更的内容。"""
+    with storage.open_db(root) as connection:
+        events = storage.list_agent_events(connection, session_id)
+    selection: list[dict[str, object]] | None = None
+    for event in reversed(events):
+        if event["event_type"] != "skill_selection":
+            continue
+        try:
+            payload = json.loads(str(event["payload_json"]))
+        except json.JSONDecodeError:
+            continue
+        raw_skills = payload.get("skills") if isinstance(payload, dict) else None
+        if isinstance(raw_skills, list) and all(isinstance(item, dict) for item in raw_skills):
+            selection = [dict(item) for item in raw_skills]
+            break
+    if not selection:
+        return ""
+    names = [str(item.get("name") or "") for item in selection]
+    if any(not name for name in names):
+        raise AgentError("invalid_skill_selection", "Agent session 的 Skill 审计记录损坏", exit_code=2)
+    try:
+        loaded = skill_registry.load_selected(root, names)
+    except skill_registry.SkillRegistryError as error:
+        raise AgentError(error.code, error.message, exit_code=2) from error
+    if skill_registry.selection_audit(loaded) != selection:
+        raise AgentError("skill_changed_since_selection", "Skill 内容已在会话期间改变；请重新发起临时分析", exit_code=2)
+    context = skill_registry.execution_context(loaded)
+    if len(context) > 30000:
+        raise AgentError("skill_context_too_large", "选择的 Skill 正文和参考资料超过交互 Agent 上下文上限", exit_code=2)
+    return context
+
+
 def ask(
     root: Path,
     ticker: str,
     question: InteractiveQuestion,
     *,
     model: str | None = None,
+    skill_context: str = "",
+    skill_audit: list[dict[str, object]] | None = None,
     on_progress: progress.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     ticker = research._checked_ticker(ticker)
@@ -614,6 +657,8 @@ def ask(
             "当前交互 Agent 只支持已归档资料；请先用固定 collect 流程",
             exit_code=2,
         )
+    if len(skill_context) > 30000:
+        raise AgentError("skill_context_too_large", "选择的 Skill 正文和参考资料超过交互 Agent 上下文上限", exit_code=2)
     storage.initialize(root)
     session_id = str(uuid4())
     resolved_model = _resolved_model(model)
@@ -635,8 +680,12 @@ def ask(
             created_at=created_at,
         )
     _append_event(root, session_id, "question", {"question": question.question})
+    if skill_audit:
+        _append_event(root, session_id, "skill_selection", {"skills": skill_audit})
     try:
-        return _execute_session(root, session_id, question.question, on_progress=on_progress)
+        return _execute_session(
+            root, session_id, question.question, skill_context=skill_context, on_progress=on_progress
+        )
     except AgentError as error:
         if error.code in {"missing_api_key", "unauthorized"}:
             raise
@@ -654,7 +703,13 @@ def followup(
     if row["status"] == "failed":
         raise AgentError("session_failed", "失败的 session 不能继续，请重新 ask", exit_code=2)
     _append_event(root, session_id, "followup", {"question": request.question})
-    return _execute_session(root, session_id, request.question, on_progress=on_progress)
+    return _execute_session(
+        root,
+        session_id,
+        request.question,
+        skill_context=_session_skill_context(root, session_id),
+        on_progress=on_progress,
+    )
 
 
 def get_status(root: Path, session_id: str) -> dict[str, Any]:

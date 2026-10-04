@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "kind": "capability",
+  "version": "1",
+  "applies_to": ["fixed_research"],
+  "dependencies": ["company-analysis-method"],
+  "capabilities": ["fixed_research"],
+  "prompt_resources": []
+}

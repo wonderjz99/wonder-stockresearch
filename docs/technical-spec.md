@@ -6,7 +6,7 @@
 
 包 wonder_stockresearch，入口 wonder-research = wonder_stockresearch.cli:main，兼容 python -m wonder_stockresearch。
 
-按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、market.py（富途行情/财务）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（阶段 8–10 交互 Agent 与 Memo）、skill_registry.py（独立加载项目 Skill）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
+按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、market.py（富途行情/财务）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（阶段 8–10 交互 Agent 与 Memo）、capabilities.py（受控 capability 定义）、skill_registry.py（项目 Skill Catalog 与按需加载）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
 
 Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 为标准库。开发用 pytest、ruff；HTTP 用 requests，文字 PDF 用 pypdf。富途 SDK 阶段 4 锁定 `futu-api==10.11.7108`（实测可连接本机 OpenD 并返回快照/财务）。uv.lock 随实现维护。不在文档里承诺未经验证的 SDK 版本。
 
@@ -78,7 +78,8 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 阶段 2 起业务命令：
 
 - watch add TICKER [--name NAME] / watch remove TICKER / watch list：只维护本地 watched，不删除历史。
-- start TICKER [--as-of ISO] [--baseline RUN_ID]：默认 as_of 为当前带时区时间；产生 draft run 与 run_id，kind 固定为 standard。baseline 必须是同 ticker 的 completed run，时间不晚于新 run。不自动选未完成草稿。本版不提供附记/专题的启动开关，只保留表的 kind/parent_run_id 字段。
+- start TICKER [--as-of ISO] [--baseline RUN_ID] [--skill NAME]：默认 as_of 为当前带时区时间；产生 draft run 与 run_id，kind 固定为 standard。`--skill` 可重复指定可用的 `fixed_research` 方法/能力 Skill；Python 在创建 run 前按需加载正文与 reference，并仅记录名称、版本、哈希和能力。baseline 必须是同 ticker 的 completed run，时间不晚于新 run。不自动选未完成草稿。本版不提供附记/专题的启动开关，只保留表的 kind/parent_run_id 字段。
+- skill-list / skill-check [NAME]：只读输出项目 Skill Catalog，或检查指定/全部 Skill 的 manifest、依赖、目录内 resources 和 Capability Registry 绑定；发现诊断返回 exit 2。
 - status RUN_ID / history TICKER：返回状态、质量信息、来源摘要/历史元数据，不一次吐所有原文。
 - draft-read RUN_ID / review-read RUN_ID：分别只读输出当前草稿和最新结构化审查 JSON；不调用模型、不生成报告、不改变 run。draft-preview RUN_ID：在 `data/tmp/draft-previews/<RUN_ID>/` 写入未定稿 Markdown 预览及已有的结构化审查预览，不改变 run。
 - save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources。阶段 5 起校验会把 packet 内来源与该 run 已挂来源合并（`_effective_sources`），因此 CLI/API 调用方引用 collect/source-add 已归档的来源时 `sources` 可留空，不会误报 `unknown_source`；真正未归档的引用仍被拒绝。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
@@ -126,7 +127,11 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 
 默认由 CLI 的 `StderrProgress` 输出人类可读的一行；stdout 始终保留 `{ok,data,issues}` 最终结果。ProgressEvent 不包含隐藏推理、完整原文、密钥或完整工具结果。
 
-`skill_registry.py` 扫描项目根 `skills/*/SKILL.md`，读取 name、description 和正文。Skill 只作为模型上下文，不是权限系统；Python 服务仍决定哪些函数可以执行。
+`skill_registry.py` 先扫描项目根 `skills/*/SKILL.md` 和可选 `skill.json`，生成含 name、description、path、kind、version、applies_to、availability 与 content hash 的 Catalog。Router 只接收这份摘要，不能接收正文或 reference。`RoutePlan` 另有默认空数组的 `skill_names` 字段；旧 Router 输出继续兼容。
+
+无 `skill.json` 的目录是纯方法 Skill。能力 Skill 必须在 manifest 声明 `kind=capability`、至少一个 capabilities，并只引用 `capabilities.py` 中已经注册且可用的能力。所有 prompt_resources 必须位于 Skill 目录内。实际执行才用 `load_for_capability()` 读取正文和 reference；重名、缺 description、路径越界、依赖循环、未知/不可用 capability、重复选择或能力不匹配都拒绝。
+
+固定研究把实际加载的摘要写进 `run_steps.skill_selection`，随后 Writer 按摘要重新加载内容并纳入输入哈希；交互 Agent 只把摘要写入 session event，续问会重新加载并核对哈希。审计不保存 Skill 正文、reference、提示全文或隐藏推理。详见 `docs/14-skill-on-demand.md`。
 
 `router.py` 调用一次 DeepSeek 并返回严格的 `RoutePlan`。支持 `fixed_research`、`interactive_question`、`memo_save`、`session_followup`、`status_query`、`clarify` 和 `unsupported`。Router 不直接执行数据库、网络或文件操作。
 

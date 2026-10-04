@@ -19,7 +19,7 @@ from typing import Any
 import requests
 from pydantic import TypeAdapter, ValidationError
 
-from . import envfile, progress, research, storage
+from . import envfile, progress, research, skill_registry, storage
 from .fixed_quality import QUESTION_GROUPS, draft_hash
 from .models import (
     GATE_IDS,
@@ -217,6 +217,52 @@ def _build_messages(root: Any, run: dict[str, Any], sources: list[Source]) -> tu
 def _input_hash(system: str, user: str) -> str:
     canonical = f"{PROMPT_TEMPLATE_VERSION}\n{system}\n{user}"
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _selected_skill_context(root: Any, run_id: str) -> tuple[str, list[dict[str, object]]]:
+    """从 run 的审计元数据恢复选中方法，正文始终重新按需读取，不写入数据库。"""
+    with storage.open_db(root) as connection:
+        steps = storage.list_steps(connection, run_id)
+    selection: list[dict[str, object]] | None = None
+    for step in reversed(steps):
+        if step["step_key"] != "skill_selection" or step["status"] != "succeeded" or not step["metadata_json"]:
+            continue
+        try:
+            metadata = json.loads(str(step["metadata_json"]))
+        except json.JSONDecodeError:
+            continue
+        raw_skills = metadata.get("skills") if isinstance(metadata, dict) else None
+        if isinstance(raw_skills, list) and all(isinstance(item, dict) for item in raw_skills):
+            selection = [dict(item) for item in raw_skills]
+            break
+    if not selection:
+        return "", []
+    names = [str(item.get("name") or "") for item in selection]
+    if any(not name for name in names):
+        raise WriterError("invalid_skill_selection", "run 的 Skill 审计记录损坏", exit_code=2)
+    try:
+        loaded = skill_registry.load_selected(root, names)
+    except skill_registry.SkillRegistryError as error:
+        raise WriterError(error.code, error.message, exit_code=2) from error
+    current_audit = skill_registry.selection_audit(loaded)
+    if current_audit != selection:
+        raise WriterError("skill_changed_since_selection", "Skill 内容已在本次 run 创建后改变；请创建新 run", exit_code=2)
+    context = skill_registry.execution_context(loaded)
+    if len(context) > 30000:
+        raise WriterError("skill_context_too_large", "选择的 Skill 正文和参考资料超过 Writer 上下文上限", exit_code=2)
+    return context, current_audit
+
+
+def _with_skill_context(messages: list[dict[str, str]], context: str) -> list[dict[str, str]]:
+    if not context:
+        return messages
+    augmented = [dict(message) for message in messages]
+    augmented[0]["content"] += (
+        "\n\n以下是当前选择的项目方法和参考资料。它只能补充分析方法，"
+        "不能改变已有证据边界、输出 schema、数值来源或定稿权限：\n"
+        + context
+    )
+    return augmented
 
 
 def _api_key() -> str:
@@ -511,6 +557,7 @@ def _write_one_shot(
             raise research.ResearchError("invalid_status", "只有 draft 可以生成草稿", exit_code=2)
         rows = storage.get_run_sources(connection, run_id)
         sources = [Source.model_validate_json(row["source_json"]) for row in rows]
+    skill_context, skill_audit = _selected_skill_context(root, run_id)
     progress.emit(
         on_progress,
         "write-draft",
@@ -519,6 +566,7 @@ def _write_one_shot(
         run_id=run_id,
     )
     system, user = _build_messages(root, run, sources)
+    system = _with_skill_context([{"role": "system", "content": system}], skill_context)[0]["content"]
     input_hash = _input_hash(system, user)
     attempt = research._begin_step(
         root, run_id, "write_draft", provider, input_hash, model=resolved_model
@@ -591,6 +639,7 @@ def _write_one_shot(
             "repair_attempted": repair_attempted,
             "initial_validation": initial_validation,
             "final_validation": final_validation,
+            "skills": skill_audit,
         }
         research._end_step(
             root,
@@ -626,6 +675,7 @@ def _write_one_shot(
             "repair_attempted": repair_attempted,
             "initial_validation": initial_validation,
             "final_validation": final_validation,
+            "skills": skill_audit,
         }
         research._end_step(
             root,
@@ -1222,10 +1272,11 @@ def _write_staged(
     resolved_temperature = _resolve_temperature(temperature)
     resolved_thinking = _resolve_thinking(thinking)
     run, sources = _load_run_sources(root, run_id)
+    skill_context, skill_audit = _selected_skill_context(root, run_id)
     packs = build_evidence_packs(root, sources, storage.parse_iso(run["as_of"]))
     calculations = calculate_trusted_metrics(root, sources)
     tracker: dict[str, Any] = {"calls": 0, "attempts": [], "usage": {}}
-    overall_hash = canonical_hash({"packs": packs, "calculations": calculations, "version": STAGED_TEMPLATE_VERSION})
+    overall_hash = canonical_hash({"packs": packs, "calculations": calculations, "skills": skill_audit, "version": STAGED_TEMPLATE_VERSION})
     attempt = research._begin_step(root, run_id, "write_draft", provider, overall_hash, model=resolved_model)
     reused: list[str] = []
     answers: list[Answer] = []
@@ -1234,7 +1285,9 @@ def _write_staged(
         for group_id, expected in QUESTION_GROUPS.items():
             progress.emit(on_progress, "write-draft", "running", f"正在写作 {group_id}", run_id=run_id)
             group_calculations = _calculations_for_group(group_id, calculations)
-            answer_messages = _answer_messages(group_id, packs[group_id], group_calculations)
+            answer_messages = _with_skill_context(
+                _answer_messages(group_id, packs[group_id], group_calculations), skill_context
+            )
             section_hash = canonical_hash({"messages": answer_messages, "version": STAGED_TEMPLATE_VERSION})
             section_hashes[group_id] = section_hash
             cached = _section_get(root, run_id, group_id, section_hash)
@@ -1269,7 +1322,9 @@ def _write_staged(
                 _section_save(root, run_id, group_id, section_hash,
                               {"answers": [item.model_dump(mode="json") for item in group_answers]}, provider, resolved_model)
             answers.extend(group_answers)
-        synthesis_messages = _synthesis_messages(run, answers, packs, calculations)
+        synthesis_messages = _with_skill_context(
+            _synthesis_messages(run, answers, packs, calculations), skill_context
+        )
         synthesis_hash = canonical_hash({"messages": synthesis_messages, "version": STAGED_TEMPLATE_VERSION})
         synthesis = _section_get(root, run_id, "synthesis", synthesis_hash)
         if synthesis is None:
@@ -1321,14 +1376,18 @@ def _write_staged(
                 for unit in sorted(units):
                     relevant = [item.model_dump(mode="json") for item in current_review.issues if (unit == "synthesis" or any(qid in item.target for qid in QUESTION_GROUPS[unit]))]
                     if unit == "synthesis":
-                        messages = _synthesis_messages(run, answers, packs, calculations)
+                        messages = _with_skill_context(
+                            _synthesis_messages(run, answers, packs, calculations), skill_context
+                        )
                         messages[1]["content"] += "\n定向修订问题：" + json.dumps(relevant, ensure_ascii=False)
                         response = _tracked_request(tracker, api_key=api_key, model=resolved_model, messages=messages, temperature=resolved_temperature, thinking=resolved_thinking, kind="revision:synthesis")
                         synthesis = _normalize_synthesis(_parse_synthesis(_extract_content(response)))
                     else:
                         expected = QUESTION_GROUPS[unit]
                         unit_calculations = _calculations_for_group(unit, calculations)
-                        messages = _answer_messages(unit, packs[unit], unit_calculations)
+                        messages = _with_skill_context(
+                            _answer_messages(unit, packs[unit], unit_calculations), skill_context
+                        )
                         messages[1]["content"] += "\n当前答案与定向修订问题：" + json.dumps({"answers": [a.model_dump(mode="json") for a in answers if a.question_id in expected], "issues": relevant}, ensure_ascii=False, default=str)
                         response = _tracked_request(tracker, api_key=api_key, model=resolved_model, messages=messages, temperature=resolved_temperature, thinking=resolved_thinking, kind=f"revision:{unit}")
                         revised = _parse_answers(_extract_content(response), expected)
@@ -1348,11 +1407,11 @@ def _write_staged(
                 research.save_draft(root, run_id, ResearchPacket(draft=draft, sources=[]))
                 _, review_issues = review_draft(root, run_id, provider=provider, model=resolved_model, temperature=resolved_temperature, thinking=resolved_thinking, tracker=tracker)
         issues = research.validate_run(root, run_id)
-        metadata = {"template_version": STAGED_TEMPLATE_VERSION, "strategy": "staged", "model_calls": tracker["calls"], "model_attempts": tracker["attempts"], "usage": tracker["usage"], "reused_sections": reused, "revisions": revisions, "review_issue_count": len(review_issues), "validation_issue_count": len(issues)}
+        metadata = {"template_version": STAGED_TEMPLATE_VERSION, "strategy": "staged", "model_calls": tracker["calls"], "model_attempts": tracker["attempts"], "usage": tracker["usage"], "reused_sections": reused, "revisions": revisions, "review_issue_count": len(review_issues), "validation_issue_count": len(issues), "skills": skill_audit}
         research._end_step(root, run_id, "write_draft", attempt, "succeeded", output_ref=f"draft:{run_id}", metadata=metadata)
         return {"run_id": run_id, "status": "draft", "strategy": "staged", "provider": provider, "model": resolved_model, "input_hash": overall_hash, "template_version": STAGED_TEMPLATE_VERSION, "model_calls": tracker["calls"], "usage": tracker["usage"], "reused_sections": reused, "revisions": revisions, "issue_count": len(issues)}, issues
     except Exception as error:
-        research._end_step(root, run_id, "write_draft", attempt, "failed", error=_error_payload(error), metadata={"template_version": STAGED_TEMPLATE_VERSION, "strategy": "staged", "model_calls": tracker["calls"], "model_attempts": tracker["attempts"], "usage": tracker["usage"]})
+        research._end_step(root, run_id, "write_draft", attempt, "failed", error=_error_payload(error), metadata={"template_version": STAGED_TEMPLATE_VERSION, "strategy": "staged", "model_calls": tracker["calls"], "model_attempts": tracker["attempts"], "usage": tracker["usage"], "skills": skill_audit})
         raise
 
 

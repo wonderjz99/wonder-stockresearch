@@ -113,7 +113,8 @@ start
   "focus": "general",
   "confidence": 0.91,
   "reason": "用户要求生成公司研究报告",
-  "requires_confirmation": true
+  "requires_confirmation": true,
+  "skill_names": ["company-research"]
 }
 ```
 
@@ -133,14 +134,11 @@ Router 不能直接调用数据库、富途、文件系统或 shell。股票代�
 
 ## 5. Skill Registry
 
-`skill_registry.py` 扫描项目根目录下的 `skills/*/SKILL.md`，读取：
+`skill_registry.py` 扫描项目根目录下的 `skills/*/SKILL.md`，先形成只含 `name`、`description`、相对路径、类别、适用能力和可用性的 Catalog。Router Prompt 只接收 Catalog 摘要；它不接收 Skill 正文或 reference 内容。
 
-- `name`
-- `description`
-- Skill 正文
-- 相对文件路径
+`RoutePlan.skill_names` 是 Router 选择的名称列表。Python 先用 Catalog 检查名称、依赖、适用 capability 和 Capability Registry；用户确认并真正开始执行后，才加载 `SKILL.md` 正文及其 `skill.json` 声明的目录内 `prompt_resources`。方法 Skill 只补充分析方法；能力 Skill 必须绑定已注册的 Python capability。正文不能增加网络、shell、数据库写入或定稿权限。
 
-Skill 正文作为模型上下文，不是程序权限。程序仍然通过 Pydantic、工具白名单、研究服务和数据库状态控制实际操作。
+实际加载的名称、版本与内容哈希会进入 run step 或 Agent session event；正文和 reference 不入库。正文变更后不能混入已有 run 或 Agent session。完整约定见[阶段 17：Skill 按需加载](14-skill-on-demand.md)。
 
 Skill 的默认且完整执行路径是项目内 Python Skill Registry：
 

@@ -2,21 +2,22 @@
 
 ## 当前状态
 
-- 当前阶段：16.1 定向证据恢复。富途年度字段、SQLite 页级索引、年报 Capex 输入和离线验证均已完成；中国移动、联通、电信的新草稿均已通过当前 `validate`。中国移动的 Q09 曾被新状态规则识别为 `answered_with_gap`，已通过可恢复分组重试修正并重新审查。三份均保持 draft，不会自动 `finish`。阶段 17 尚未开始。
+- 当前阶段：17 Skill 按需加载已完成。富途年度字段、SQLite 页级索引、年报 Capex 输入和离线验证均已完成；中国移动、联通、电信的新草稿均已通过当前 `validate`。中国移动的 Q09 曾被新状态规则识别为 `answered_with_gap`，已通过可恢复分组重试修正并重新审查。三份均保持 draft，不会自动 `finish`。
 - 业务软件：固定研究新增六组 EvidencePack、Decimal 可信计算、staged Writer、定向修订、DraftReview、schema v6 `draft_sections`/`draft_reviews`、schema v7 `source_page_fts`、`review-draft` 和 finish 语义门闸。既有 collect、交互 Agent、Memo、chat 与历史完成报告保持兼容。
 - 附记正文与估值：仍未实现。真实 DeepSeek API smoke 已跑通；加入 fundamentals 后 HK.00728 草稿由“1 answered/23 partial”变为“24 answered、6/6 门闸 pass、M1–M6 均有分”。
 - writer schema 修复：已加入 `gap` Prompt 约束和一次受控结构修复；修复仍失败保持 `invalid_schema`，不保存草稿、不自动 `finish`。
 - 报告层：新完成报告使用 Q01–Q24 完整问题文本、中文标签、精确数值格式和短引用索引；TTY 完成反馈列绝对路径，非 TTY 保持 JSON。
 - Writer：默认模板为 `deepseek-staged-v5`；`deepseek-draft-v3` one-shot 仅保留回归。分组 Writer 只接收与该组相关的可信计算，模型提示不替代语义审查，最终 error 不会被自动 finish。
 - 自然语言失败反馈：`validation_failed` 在 TTY 显示问题位置、错误码、解释与 run_id；非 TTY 返回 `ok=false`、issues 和 exit 2，不会误报成功。
+- Skill：Router 仅接收 Catalog 摘要；`skill-list`、`skill-check` 和 `start --skill` 可用。方法正文/reference 只在确认后的 Writer 或交互 Agent 执行边界加载，实际加载的名称、版本、内容哈希进入 run step 或 Agent event，正文不落库。
 
 ## 已准备的交接文件
 
 README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md、docs/teaching-contract.md、docs/provenance.md、docs/09-agent-layer.md、skills/company-analysis-method/、skills/interactive-research-agent/ 和本文件。
 
-## 下一步（查看三份草稿后暂停等待用户验收）
+## 下一步（阶段 18 前暂停）
 
-用户可查看中国移动 `fe6ecce2…`、中国联通 `e491dee8…` 和中国电信 `e5d20c8…` 的新草稿及结构化审查。重点核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23 的问题对齐、当期口径和原文 locator；所有 run 仍保持 draft，只有用户决定后才能 `finish`。用户验收后才进入阶段 17 Skill 按需加载。开放问题临时计算、Pi Agent Core 对比和受限 AnalysisWorkspace 继续列为阶段 18–20；当前不迁移技术栈、不引入 LangGraph。
+用户可查看中国移动 `fe6ecce2…`、中国联通 `e491dee8…` 和中国电信 `e5d20c8…` 的新草稿及结构化审查。重点核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23 的问题对齐、当期口径和原文 locator；所有 run 仍保持 draft，只有用户决定后才能 `finish`。下一阶段是开放问题的受限 `AnalysisWorkspace`：优先复用可信固定计算，只有现有 capability 不能回答时才允许临时代码；Pi Agent Core 评估仍在阶段 20，当前不迁移技术栈、不引入 LangGraph。
 
 ## 阶段 16.1 记录
 
@@ -43,6 +44,30 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - 中国联通 `e491dee8…` 已重写为 0 error / 20 warning，`validate` 通过；最后成功尝试为 11 calls、389702 tokens、0 个修订单元。中国电信 `e5d20c8…` 已重写为 0 error / 20 warning，`validate` 通过；最后成功尝试为 8 calls、371399 tokens、4 个修订单元。两份均保持 draft。
 - 审查 Prompt 现明确 `NumericFact` 的逐项数值和来源就是可复核正文；在明确携带 `supports` 引用时，模型不能仅因自然语言句子未重复计算输入或 PDF 使用 `page N` 而报 error。Python 仅对这些可从结构验证的误报降级。
 - `validate_packet` 现在拒绝 `answered_with_gap`，`derive_quality_status` 也会将它标为 `evidence_incomplete`；缓存复用同样执行此规则。
+
+## 阶段 17 记录
+
+阶段：17，Skill 按需加载与 Capability Registry。
+
+完成日期：2026-10-04。
+
+实现内容：
+
+- 新增 `capabilities.py`：`fixed_research`、`interactive_research` 和预留但不可用的 `analysis_workspace` 均有 Pydantic 输入/输出、权限说明和审计目标。Skill Markdown 不能创建新 capability 或副作用。
+- 重写 `skill_registry.py` 为 Catalog 与按需加载两层：Router 只能取得 name、description、path、kind、适用 capability 和可用性摘要；`load_for_capability` 在执行边界才读取 `SKILL.md` 与目录内 reference，并对内容哈希做一致性校验。
+- 新增可选 `skill.json`。没有 manifest 的目录为纯方法 Skill；能力 Skill 必须声明已注册 capability。拒绝缺 description、资源越界/不存在、重名、依赖循环、重复依赖/capability、未知或尚不可用 capability、重复选择与 capability 不匹配。
+- `RoutePlan` 新增默认空数组 `skill_names`，旧 Router JSON 保持兼容。`start --skill`、`skill-list`、`skill-check [NAME]` 已实现；现有 `company-research` 和 `interactive-research-agent` 迁移为能力 Skill，均依赖 `company-analysis-method` 方法 Skill。
+- `start` 和固定 `chat` 会把加载的名称、版本、内容哈希、类型和 capability 写入 `run_steps.skill_selection`。`write-draft` 从该审计记录重新加载内容，纳入 Prompt 与输入哈希；内容改变时返回 `skill_changed_since_selection`，不混用旧 run。
+- 交互 `chat` 在确认后把选中方法正文/reference 加入受限 Agent 上下文；Agent event 只记录摘要。`ask-followup` 重新加载并核对同一哈希，内容改变时停止会话。Python 工具白名单、来源引用验证、ResearchRun 状态和 finish 确认仍为权威控制。
+- 新增教学文档 `docs/14-skill-on-demand.md`，同步更新 README、PLAN、自然语言入口和技术规格。
+
+验证：
+
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：143 passed（2026-10-04）。新增覆盖 Router 摘要不泄露正文/reference、纯方法即插即用、内容哈希、非法 manifest/路径/循环/能力、旧 RoutePlan、固定 Writer 重载和交互 Agent 上下文；既有全量回归同时通过。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。
+- 尚未调用真实 DeepSeek，也没有新建真实 ResearchRun 或执行 finish；三家电信 draft 及已完成历史报告未改动。
+
+已知限制：阶段 17 不提供临时代码、shell、网络或新数据能力。`analysis_workspace` 仅注册为未来 capability；阶段 18 才实现只读数据导出、临时目录、资源上限、代码/输入哈希和结果审计。
 
 ## 阶段 16 记录
 
@@ -77,7 +102,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 新增/修改文件：`src/wonder_stockresearch/fixed_quality.py`、`models.py`、`storage.py`、`research.py`、`writer.py`、`cli.py`、`tests/test_stage16_quality.py` 及相关回归测试、`docs/13-fixed-research-quality.md`、README、PLAN、技术规格和本文件。
 
-已知限制：三家均通过自动门闸，但 warning 仍需用户人工审阅后才应 finish。Reviewer token 较高且仍会误报，Python 只降级可确定识别的自相矛盾，不替模型放行实质问题。当前证据检索为关键词排序，不是语义检索。阶段 17 暂停，等待用户查看结果。
+已知限制：三家均通过自动门闸，但 warning 仍需用户人工审阅后才应 finish。Reviewer token 较高且仍会误报，Python 只降级可确定识别的自相矛盾，不替模型放行实质问题。当前证据检索为关键词排序，不是语义检索。阶段 17 已完成；阶段 18 的临时计算环境尚未开始。
 
 ## 阶段 15 记录
 

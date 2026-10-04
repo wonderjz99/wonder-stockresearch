@@ -40,8 +40,9 @@ def _system_prompt(root: Path) -> str:
         "不要为了凑字段猜测唯一 ticker。company_name 填用户原始搜索词，后续由证券目录和用户选择消歧。"
         "如果用户给出明确股票代码则照原样填写，并设置 requires_confirmation=true。\n"
         "输出必须是单个 JSON 对象，字段只能是：intent、company_name、ticker、question、focus、"
-        "confidence、reason、requires_confirmation。\n"
-        f"当前可用 Skill：\n{skill_registry.prompt_context(root)}"
+        "confidence、reason、requires_confirmation、skill_names。skill_names 只列与该请求直接相关且 available=true 的名称；"
+        "没有合适 Skill 时返回空数组。\n"
+        f"当前可用 Skill 摘要：\n{skill_registry.catalog_prompt(root)}"
     )
 
 
@@ -101,10 +102,10 @@ def _repair_plan(
         "你是 JSON 协议修复器。请根据原始用户输入和上一次模型输出，"
         "只返回符合给定字段的单个 JSON 对象，不要解释。"
         "字段必须是 intent、company_name、ticker、question、focus、confidence、reason、"
-        "requires_confirmation；简称有歧义时 ticker 必须为 null，focus 使用 general。\n"
+        "requires_confirmation、skill_names；简称有歧义时 ticker 必须为 null，focus 使用 general。\n"
         f"当前协议错误：{error.message}\n"
         "允许的 intent：fixed_research、interactive_question、memo_save、session_followup、"
-        f"status_query、clarify、unsupported。\n项目 Skill 上下文：\n{skill_registry.prompt_context(root)}"
+        f"status_query、clarify、unsupported。\n项目 Skill 摘要：\n{skill_registry.catalog_prompt(root)}"
     )
     response = writer._request_deepseek(
         api_key=writer._api_key(),
@@ -175,6 +176,18 @@ def route(
         fallback = fallback or _watchlist_ticker(root, plan.company_name)
         if fallback:
             plan = plan.model_copy(update={"ticker": fallback})
+    try:
+        # 这里仅验证 catalog 元数据与 capability 绑定；正文和 references 必须在执行时才加载。
+        intent_capability = {
+            "fixed_research": "fixed_research",
+            "interactive_question": "interactive_research",
+        }.get(plan.intent)
+        if intent_capability:
+            skill_registry.validate_for_capability(root, plan.skill_names, intent_capability)
+        else:
+            skill_registry.resolve_selected(root, plan.skill_names)
+    except skill_registry.SkillRegistryError as error:
+        raise RouterError(error.code, error.message, exit_code=2) from error
     progress.emit(
         on_progress,
         "route",
