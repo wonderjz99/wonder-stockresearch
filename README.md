@@ -111,6 +111,10 @@ cp .env.example .env      # 已为你创建；打开填入自己的值
 
 Python 3.11、uv、Pydantic 2、标准库 sqlite3/argparse、pytest。按阶段再加入 HTTP 客户端、PDF 文本提取与富途 SDK。
 
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
+
 已实际验证的命令：
 
 ```bash
