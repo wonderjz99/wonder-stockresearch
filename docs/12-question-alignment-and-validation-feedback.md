@@ -10,7 +10,7 @@
 
 ## 统一的问题定义
 
-`src/wonder_stockresearch/questions.py` 维护 Q01–Q24 的完整文本，正式报告和 Writer 从同一份定义读取。这样避免报告标题和模型提示使用不同版本的问题措辞。
+`src/wonder_stockresearch/fixed/questions.py` 维护 Q01–Q24 的完整文本，正式报告和 Writer 从同一份定义读取。这样避免报告标题和模型提示使用不同版本的问题措辞。
 
 Q03 和 Q04 另有明确范围约束：
 

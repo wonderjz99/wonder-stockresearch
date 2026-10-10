@@ -67,7 +67,7 @@ finish RUN_ID
   → 再校验一次，写出 company.md + research.json，状态 completed
 ```
 
-对应的主要函数依次是 [`research.start_run()`](../src/wonder_stockresearch/research.py)、`research.collect()` / `research.source_add()`、[`writer.write_draft()`](../src/wonder_stockresearch/writer.py)、`research.validate_run()` 和 `research.finish_run()`。CLI 只解析参数、调用这些函数、输出结果；它不自己计算评分或绕过校验。
+对应的主要函数依次是 [`research.start_run()`](../src/wonder_stockresearch/fixed/research.py)、`research.collect()` / `research.source_add()`、[`writer.write_draft()`](../src/wonder_stockresearch/fixed/writer.py)、`research.validate_run()` 和 `research.finish_run()`。CLI 只解析参数、调用这些函数、输出结果；它不自己计算评分或绕过校验。
 
 ### 资料从哪里来？
 
@@ -79,13 +79,13 @@ finish RUN_ID
 
 `writer.py` 只读取该 run 已归档的资料片段和研究规则，要求 DeepSeek 返回符合 `ResearchDraft` 形状的 JSON。模型不能自行增加真实来源；它写出的 `source_id` 必须能在本次 run 的资料里找到。`write-draft` 保存草稿，但**不会调用 `finish`**。
 
-[`research.validate_packet()`](../src/wonder_stockresearch/research.py) 检查 24 问、6 个门闸、6 个护城河维度是否齐全，引用是否存在，关键结论有没有合格的支持来源，来源在 `as_of` 时点是否可用，以及关键冲突是否解决。`validate_run()` 还检查已归档文件。六个维度都有分数时，Python 才计算 0–60 总分；有任何一个 `null`，总分就是 `null`。
+[`research.validate_packet()`](../src/wonder_stockresearch/fixed/research.py) 检查 24 问、6 个门闸、6 个护城河维度是否齐全，引用是否存在，关键结论有没有合格的支持来源，来源在 `as_of` 时点是否可用，以及关键冲突是否解决。`validate_run()` 还检查已归档文件。六个维度都有分数时，Python 才计算 0–60 总分；有任何一个 `null`，总分就是 `null`。
 
 校验是**程序能检查的边界**，不是对模型结论的事实证明。比如程序能发现“Q03 没有合格引用”，但不能可靠判断“Q03 的文字是否真的分析了资本开支”。这仍需要读原文和审阅报告。价格与估值也不能改变公司评分；估值四问目前尚未实现。
 
 ### 为什么还要单独 `finish`？
 
-`finish_run()` 会重新校验草稿，才调用 [`reports.render_company()`](../src/wonder_stockresearch/reports.py) 生成 `company.md`，并导出 `research.json`。如果这次 run 指定了已完成的 `baseline`，还会生成对比用的 `review.md`。文件写成功后，程序记录它们的 SHA-256，再把 run 标成 `completed`。已完成的版本不能被新草稿覆盖；要更新判断就新开 run。
+`finish_run()` 会重新校验草稿，才调用 [`reports.render_company()`](../src/wonder_stockresearch/fixed/reports.py) 生成 `company.md`，并导出 `research.json`。如果这次 run 指定了已完成的 `baseline`，还会生成对比用的 `review.md`。文件写成功后，程序记录它们的 SHA-256，再把 run 标成 `completed`。已完成的版本不能被新草稿覆盖；要更新判断就新开 run。
 
 ## 4. 一句话入口与开放问题
 
@@ -122,7 +122,7 @@ data/
 如果你想顺着一条真实请求阅读，建议按这个顺序：
 
 1. 在 [`cli.py`](../src/wonder_stockresearch/cli.py) 找 `build_parser()` 和 `_run_business()`，看 `start`、`collect`、`write-draft`、`validate`、`finish` 分别调用谁。
-2. 在 [`research.py`](../src/wonder_stockresearch/research.py) 看 `start_run()`、`save_draft()`、`validate_run()`、`finish_run()`，理解状态怎样从 `draft` 变成 `completed`。
+2. 在 [`research.py`](../src/wonder_stockresearch/fixed/research.py) 看 `start_run()`、`save_draft()`、`validate_run()`、`finish_run()`，理解状态怎样从 `draft` 变成 `completed`。
 3. 在 [`models.py`](../src/wonder_stockresearch/models.py) 看 `ResearchDraft`、`Source`、`EvidenceRef`、`ResearchPacket`，理解传递的 JSON 长什么样。
 4. 在 [`storage.py`](../src/wonder_stockresearch/storage.py) 看 `_SCHEMA`、`initialize()`、`project_lock()`；把 SQL 表与上面的对象对上。
 5. 最后再读 `writer.py`、`chat.py`、`agent.py`。它们是不同的入口与写作方式，共用前面的研究规则和存储。

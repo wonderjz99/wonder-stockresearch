@@ -319,7 +319,15 @@ def reconcile_sources(root: Path, sources: list[Source]) -> list[SourceConflict]
                     else ReconciliationStatus.CONFLICT
                 )
             identity = "|".join(
-                [str(provider.id), fact["metric"] or "", fact["period"] or "", official_source_id or ""]
+                [
+                    str(provider.id),
+                    fact["metric"] or "",
+                    fact["period"] or "",
+                    # 同一富途来源可能同时给出 CNY 与 HKD 的同指标/期间数值；它们是
+                    # 不可合并的独立核对事实，必须有不同的 storage 主键。
+                    fact["currency"] or "",
+                    official_source_id or "",
+                ]
             )
             conflicts.append(
                 SourceConflict(

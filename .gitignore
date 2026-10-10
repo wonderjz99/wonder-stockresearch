@@ -10,3 +10,7 @@ data/
 *.egg-info/
 build/
 dist/
+# 项目自带的 Pi runtime；保留源码、构建脚本与运行文件，排除安装依赖。
+node_modules/
+# 个人学习路线、练习成果与面试准备；不进入版本库。
+/study/

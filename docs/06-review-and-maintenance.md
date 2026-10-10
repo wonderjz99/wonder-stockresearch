@@ -26,16 +26,16 @@ data/backups/<name>/{wonder.db, files/…, manifest.json, RESTORE.md}
 
 ## 3. 实际文件与入口
 
-- `src/wonder_stockresearch/research.py`
+- `src/wonder_stockresearch/fixed/research.py`
   - `compare_runs(root, run_id)`：要求 `baseline_run_id`；草稿可预览，返回结构化差异。
   - `_build_comparison(connection, run, baseline)`：纯计算。逐项比较 Q01–Q24 状态、G1/G2/G3/G5/G6/G7 结果、M1–M6 分数与总分；`_score_diff` 保证任一侧为 `null` 时差值为 `null`（不适用）；`comparable=false` 时不算分差。
   - `_draft_referenced_source_ids(draft)` + run_sources 集合差：区分**本次新增来源**与**沿用基准来源**，旧来源保留原始 `retrieved_at`/`published_at`，不能冒充新取得。
   - `backup(root, output, *, lock_timeout=...)`：在项目写锁内执行；`_backup_destination` 限定目标在 `root/data/backups/` 下且不存在。
   - `finish_run`：有 baseline 时重新校验 baseline 已完成，计算 comparison，写 `review.md`，并把其哈希纳入 `artifact_hashes_json`。
 - `src/wonder_stockresearch/storage.py`：`backup_database`（`sqlite3` backup API）、`list_all_sources`、`list_completed_runs`。
-- `src/wonder_stockresearch/reports.py`：`render_review(comparison)` 固定结构 Markdown，缺分差显示“不适用”。
+- `src/wonder_stockresearch/fixed/reports.py`：`render_review(comparison)` 固定结构 Markdown，缺分差显示“不适用”。
 - `src/wonder_stockresearch/cli.py`：新增 `compare RUN_ID` 与 `backup --output PATH`；并捕获 `storage.StorageError`（锁超时等）为 exit 1，而非抛栈。
-- `src/wonder_stockresearch/research.py`（核心证据 as_of 可用性收口）：`_is_core_eligible` 现在对 provider 直接读取 `metadata.observed_at` 与 `draft.as_of` 比较，并仍要求 `observed_after_as_of` 不为 true；只有日期（`publication_precision=date`）的 primary 以当地日终为保守可用时点。两者都只在 as_of 时点已可用时才能支撑 answered/pass-fail/非 null 评分。
+- `src/wonder_stockresearch/fixed/research.py`（核心证据 as_of 可用性收口）：`_is_core_eligible` 现在对 provider 直接读取 `metadata.observed_at` 与 `draft.as_of` 比较，并仍要求 `observed_after_as_of` 不为 true；只有日期（`publication_precision=date`）的 primary 以当地日终为保守可用时点。两者都只在 as_of 时点已可用时才能支撑 answered/pass-fail/非 null 评分。
 - `tests/test_review_and_backup.py`：6 个离线测试；`tests/test_evidence_as_of.py`：补充 provider `observed_at`、缺 `observed_at` 与日期精度用例。
 
 ## 4. 最小可运行示例与真实结果

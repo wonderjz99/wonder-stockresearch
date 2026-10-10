@@ -32,11 +32,19 @@ class FakeSearchProvider:
         self.closed = True
 
 
-def test_resolve_futu_candidates_normalizes_codes_and_filters_security_types(tmp_path: Path) -> None:
+def test_resolve_futu_candidates_normalizes_codes_and_filters_security_types(
+    tmp_path: Path,
+) -> None:
     root = make_root(tmp_path)
     provider = FakeSearchProvider(
         [
-            {"market": "HK", "code": "06049", "name": "保利物业", "sec_type": "STOCK", "is_watched": True},
+            {
+                "market": "HK",
+                "code": "06049",
+                "name": "保利物业",
+                "sec_type": "STOCK",
+                "is_watched": True,
+            },
             {"market": "HK", "code": "00119", "name": "保利置业", "sec_type": "STOCK"},
             {"market": "HK", "code": "03800", "name": "协鑫科技", "sec_type": "STOCK"},
             {"market": "HK", "code": "01234", "name": "保利 ETF", "sec_type": "ETF"},
@@ -58,8 +66,8 @@ def test_resolve_uses_unverified_model_candidates_when_futu_unavailable(
     root = make_root(tmp_path)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.setattr(
-        symbols.writer,
-        "_request_deepseek",
+        symbols.model_request,
+        "request_deepseek",
         lambda **kwargs: {
             "choices": [
                 {

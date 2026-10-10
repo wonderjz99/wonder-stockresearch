@@ -34,7 +34,7 @@ source-read RUN SOURCE [--page N | --start-line N]
   - `load_file(path)`：只读用户提供的文件，同样有 50 MiB 上限。
   - `extract_text(bytes, ext, content_type)`：PDF 用 `pypdf` 逐页提取并以 `\f` 连接；HTML 用标准库 `HTMLParser` 取可见文本、跳过 `script/style`，不执行脚本；文本类按 charset 解码。无法提取时返回 `extraction_unavailable`。
 - `src/wonder_stockresearch/models.py`：新增 `SourceRequest`（`url` 与 `file` 恰好一个，`publication_precision` 与 `published_at` 一致）。
-- `src/wonder_stockresearch/research.py`：新增 `source_add`、`list_sources`、`read_source`，以及 `_archive_issues`（只校验 `data/stocks/` 下的来源，教学元数据来源不受影响）。
+- `src/wonder_stockresearch/fixed/research.py`：新增 `source_add`、`list_sources`、`read_source`，以及 `_archive_issues`（只校验 `data/stocks/` 下的来源，教学元数据来源不受影响）。
 - `src/wonder_stockresearch/storage.py`：新增 `write_bytes_atomic`、`find_source_by_hash`、`get_source`、`is_source_linked`。
 - `src/wonder_stockresearch/cli.py`：新增 `source-add`、`sources`、`source-read`。
 - `pyproject.toml`：新增 `requests`、`pypdf` 依赖。

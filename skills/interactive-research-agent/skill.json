@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "kind": "capability",
-  "version": "1",
+  "version": "2",
   "applies_to": ["interactive_research"],
   "dependencies": ["company-analysis-method"],
   "capabilities": ["interactive_research"],

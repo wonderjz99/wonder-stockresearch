@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from wonder_stockresearch import disclosures, market, research, sources
+from wonder_stockresearch import disclosures, market, sources
 from wonder_stockresearch.cli import main
 from wonder_stockresearch.disclosures import FilingCandidate
+from wonder_stockresearch.fixed import research
 from wonder_stockresearch.sources import AcquiredSource, SourceError
 
 
@@ -66,7 +67,11 @@ class FakeMarketProvider:
                             "currency_code": "CNY",
                             "accounting_standards": "国际会计准则",
                             "item_list": [
-                                {"field_id": 5001, "display_name": "营业总收入", "data": 529559000000.0}
+                                {
+                                    "field_id": 5001,
+                                    "display_name": "营业总收入",
+                                    "data": 529559000000.0,
+                                }
                             ],
                         }
                     ],
@@ -121,17 +126,69 @@ def test_classify_title_requires_a_periodic_report_title_not_a_mention() -> None
 
 def filings_candidates() -> list[FilingCandidate]:
     return [
-        candidate("ANNUAL REPORT 2025", "https://hk.example/a2025.pdf", datetime(2026, 4, 1, tzinfo=UTC), "annual"),
-        candidate("ANNUAL REPORT 2024", "https://hk.example/a2024.pdf", datetime(2025, 4, 1, tzinfo=UTC), "annual"),
-        candidate("ANNUAL REPORT 2023", "https://hk.example/a2023.pdf", datetime(2024, 4, 1, tzinfo=UTC), "annual"),
-        candidate("ANNUAL REPORT 2022", "https://hk.example/a2022.pdf", datetime(2023, 4, 1, tzinfo=UTC), "annual"),
-        candidate("ANNUAL REPORT 2021", "https://hk.example/a2021.pdf", datetime(2022, 4, 1, tzinfo=UTC), "annual"),
-        candidate("ANNUAL REPORT 2020", "https://hk.example/a2020.pdf", datetime(2021, 4, 1, tzinfo=UTC), "annual"),
-        candidate("INTERIM REPORT 2026", "https://hk.example/i2026.pdf", datetime(2026, 8, 20, tzinfo=UTC), "interim"),
-        candidate("INTERIM REPORT 2025", "https://hk.example/i2025.pdf", datetime(2025, 8, 20, tzinfo=UTC), "interim"),
-        candidate("INTERIM REPORT 2024", "https://hk.example/i2024.pdf", datetime(2024, 8, 20, tzinfo=UTC), "interim"),
-        candidate("INTERIM REPORT 2023", "https://hk.example/i2023.pdf", datetime(2023, 8, 20, tzinfo=UTC), "interim"),
-        candidate("MONTHLY RETURN", "https://hk.example/m.pdf", datetime(2026, 9, 1, tzinfo=UTC), "other"),
+        candidate(
+            "ANNUAL REPORT 2025",
+            "https://hk.example/a2025.pdf",
+            datetime(2026, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "ANNUAL REPORT 2024",
+            "https://hk.example/a2024.pdf",
+            datetime(2025, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "ANNUAL REPORT 2023",
+            "https://hk.example/a2023.pdf",
+            datetime(2024, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "ANNUAL REPORT 2022",
+            "https://hk.example/a2022.pdf",
+            datetime(2023, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "ANNUAL REPORT 2021",
+            "https://hk.example/a2021.pdf",
+            datetime(2022, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "ANNUAL REPORT 2020",
+            "https://hk.example/a2020.pdf",
+            datetime(2021, 4, 1, tzinfo=UTC),
+            "annual",
+        ),
+        candidate(
+            "INTERIM REPORT 2026",
+            "https://hk.example/i2026.pdf",
+            datetime(2026, 8, 20, tzinfo=UTC),
+            "interim",
+        ),
+        candidate(
+            "INTERIM REPORT 2025",
+            "https://hk.example/i2025.pdf",
+            datetime(2025, 8, 20, tzinfo=UTC),
+            "interim",
+        ),
+        candidate(
+            "INTERIM REPORT 2024",
+            "https://hk.example/i2024.pdf",
+            datetime(2024, 8, 20, tzinfo=UTC),
+            "interim",
+        ),
+        candidate(
+            "INTERIM REPORT 2023",
+            "https://hk.example/i2023.pdf",
+            datetime(2023, 8, 20, tzinfo=UTC),
+            "interim",
+        ),
+        candidate(
+            "MONTHLY RETURN", "https://hk.example/m.pdf", datetime(2026, 9, 1, tzinfo=UTC), "other"
+        ),
     ]
 
 
@@ -260,9 +317,7 @@ def test_collect_filings_partial_download_failure_is_reported(
     """Hiding download failures or failing the whole step must fail this test."""
     root = make_root(tmp_path)
     run_id = start(root)
-    monkeypatch.setattr(
-        sources, "fetch_url", fake_fetch({"https://hk.example/a2025.pdf"})
-    )
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch({"https://hk.example/a2025.pdf"}))
 
     data, issues = research.collect(
         root, run_id, "filings", disclosure_provider=FakeDisclosureProvider(filings_candidates())

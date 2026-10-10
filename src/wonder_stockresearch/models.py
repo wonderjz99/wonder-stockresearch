@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -253,13 +253,15 @@ class InteractiveQuestion(StrictModel):
         "capacity_cycle",
         "inventory_cycle",
     ] = "general"
-    context: Literal["latest_completed_report", "latest_run", "sources", "memos"] = (
+    context: Literal["latest_completed_report", "latest_run", "sources", "memos", "company_latest"] = (
         "latest_completed_report"
     )
     run_id: str | None = None
-    allow_network: bool = False
-    max_iterations: int = Field(default=6, ge=1, le=10)
-    token_budget: int = Field(default=12000, ge=256, le=50000)
+    allow_network: bool = True
+    max_iterations: int = Field(default=10, ge=1, le=10)
+    token_budget: int = Field(default=60000, ge=256, le=60000)
+    input_token_limit: int = Field(default=16000, ge=1024, le=16000)
+    output_token_limit: int = Field(default=4096, ge=64, le=8192)
 
 
 class RoutePlan(StrictModel):
@@ -401,6 +403,9 @@ class MemoRequest(StrictModel):
     tags: list[str] = Field(default_factory=list, max_length=20)
 
 
+LegacyTurnId = Annotated[str, Field(pattern=r"^legacy-[0-9a-f-]{36}$")]
+
+
 class CompanyMemo(StrictModel):
     """公司级长期备忘录；不是正式报告，也不直接参与评分。"""
 
@@ -410,6 +415,8 @@ class CompanyMemo(StrictModel):
     content: str = Field(min_length=1)
     source_refs: list[EvidenceRef] = Field(min_length=1)
     created_from_session: UUID4
+    created_from_turn: UUID4 | LegacyTurnId | None = None
+    created_from_report_turn: UUID4 | LegacyTurnId | None = None
     tags: list[str] = Field(default_factory=list)
     version: int = Field(ge=1)
     created_at: datetime

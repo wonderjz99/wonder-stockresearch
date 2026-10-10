@@ -27,8 +27,8 @@ validate_packet(packet)
 
 - `pyproject.toml`：Python 3.11、Pydantic、pytest、ruff 和 `wonder-research` 入口。
 - `src/wonder_stockresearch/models.py`：严格输入契约，例如 `ResearchDraft`、`Source`、`Statement`、门闸和护城河评分。
-- `src/wonder_stockresearch/research.py`：`validate_packet(packet)`、`derive_score_total(draft)` 与质量状态派生。
-- `src/wonder_stockresearch/reports.py`：`render_company(packet)`，只渲染已解析的对象。
+- `src/wonder_stockresearch/fixed/research.py`：`validate_packet(packet)`、`derive_score_total(draft)` 与质量状态派生。
+- `src/wonder_stockresearch/fixed/reports.py`：`render_company(packet)`，只渲染已解析的对象。
 - `src/wonder_stockresearch/cli.py`：`main(argv)` 与两个阶段 1 子命令。
 - `tests/fixtures.py`：完整虚构 `SYNTHETIC` 包，含 Q01–Q24、六门闸、M1–M6、两个来源、反方观点与一个 `null` 分数。
 

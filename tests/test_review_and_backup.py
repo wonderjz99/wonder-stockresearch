@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import research, storage
+from wonder_stockresearch import storage
+from wonder_stockresearch.fixed import research
+from wonder_stockresearch.fixed.research import ResearchError
 from wonder_stockresearch.models import ResearchPacket, SourceRequest
-from wonder_stockresearch.research import ResearchError
 
 
 def make_root(tmp_path: Path) -> Path:
@@ -64,7 +65,9 @@ def modified_packet() -> ResearchPacket:
     return ResearchPacket.model_validate(data)
 
 
-def completed_run(root: Path, ticker: str = "SYNTHETIC", packet: ResearchPacket | None = None) -> str:
+def completed_run(
+    root: Path, ticker: str = "SYNTHETIC", packet: ResearchPacket | None = None
+) -> str:
     run_id = str(research.start_run(root, ticker)["run_id"])
     research.save_draft(root, run_id, packet if packet is not None else packet_for(ticker))
     research.finish_run(root, run_id)
@@ -98,7 +101,10 @@ def test_finish_with_baseline_writes_review_and_keeps_baseline(tmp_path: Path) -
 
     assert (run_dir(root, baseline) / "company.md").read_bytes() == baseline_company
     with storage.open_db(root) as connection:
-        assert json.loads(storage.get_run(connection, baseline)["artifact_hashes_json"]) == baseline_hashes
+        assert (
+            json.loads(storage.get_run(connection, baseline)["artifact_hashes_json"])
+            == baseline_hashes
+        )
     assert research.finish_run(root, baseline)["status"] == "completed"
 
 

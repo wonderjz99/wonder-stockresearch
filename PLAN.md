@@ -1,6 +1,53 @@
 # wonder-stockresearch 实施计划
 
-状态：阶段 1–18 已实现；阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 已完成按需 Skill Catalog、Capability Registry、执行审计和 Writer/Agent 上下文加载。阶段 18 已扩展既有 Python Agent loop：来源仲裁、工作记忆、长期记忆索引与受限 `AnalysisWorkspace` 均已落地；不引入 LangGraph、多 Agent 或 Pi runtime。
+## 2026-10-09—10：混合架构 B——执行边界、分包与 Pi TypeScript 包装（离线完成）
+
+按架构评审第 10、13、15 节开始下一教学阶段。采用 Python 研究核心 + Pi 通用循环；本阶段先完成可独立验收的执行架构整理，后续数字产物渲染和查询快照优化仍各自验收，不借重构悄悄改变回答或研究方法。
+
+1. 抽出共用 Session/Turn/Attempt 操作、预算状态、工具执行与结果接收，消除 Pi 反向引用 Agent 入口的私有函数；旧循环作为兼容适配器调用相同业务操作。
+2. 新问题创建时固定运行时；恢复执行以 Turn 快照为准。保留旧历史，不切换默认、不删除旧循环；未知 runtime 或不兼容协议在模型请求前拒绝。
+3. 为本地 JSONL 配置、控制请求与结果定义版本及 Pydantic 校验，区分必须等待的业务操作和运行进度通知。Pi 用原生 subscribe/transformContext/followUp 及合适的工具前后钩子连接 Python 操作，不引入 coding-agent/Harness 会话或自建事件框架。
+4. 工具直接登记普通 handler，统一授权/参数检查，按需读取数据；统一内部成功/错误结果与模型投影边界，保留原始业务 payload、事实标签、回执和产物。
+5. 抽出公共 Python 模型传输，解除 Router/旧问答对 Writer 私有请求实现的依赖；Writer 分组写作与模型参数、预算、错误行为保持兼容。
+6. 按用户要求集中在架构整理后验证：离线协议、原生钩子、固定 runtime、未知 usage、恢复/中断、授权与冻结回归，再运行两条路径全量测试、Ruff、打包/文档检查。更新实际架构与中文教学、PROGRESS 后暂停。
+
+2026-10-10 用户追加并分别确认：本轮纳入 Python 分包（`fixed` / `interactive` / `interactive.pi`），固定与问答共用计算先提至按职责命名的公共模块；CLI、公开 `agent.py`、数据源与数据库入口保持稳定，不为每个旧内部模块创建 shim。用户另明确同意仅将 `pi_runtime/runner.mjs` 的 SDK 包装源码改成 `src/runner.ts`，增加项目内锁定开发依赖、类型检查和构建；Python 启动构建后的 JavaScript，Pi runtime 目录不移动。迁移直接同步代码、测试、脚本和文档引用，完成后再集中复验。研究契约、提示词、默认 runtime 与真实额度不借此改变。
+
+真实模型额度仍为 40/40，不新增模型/OpenD 调用、主库迁移或 Git 提交。除用户追加确认的 Pi TypeScript 编译开发依赖外不安装其他依赖。后续“计算到回答”的结构化渲染会单独明确输出契约；本阶段不声称修复了 30 题的语义质量。
+
+实际结果：分包、共用计算与 TypeScript 构建完成后，默认/Pi 全量各 **368 passed**；TypeScript typecheck/build/check:generated、Ruff、diff 检查和 wheel 构建/隔离加载均通过。源码/文档入口见 [执行架构说明](docs/35-agent-execution-architecture.md)，详细命令与限制见 PROGRESS。此教学阶段完成后暂停；后续相关性上下文、结构化数字渲染和快照优化尚未实施。
+
+## 2026-10-09：Pi 问答可靠性修复（离线实现完成，真实收益待复测）
+
+用户确认按失败复盘继续修改，暂不开启 thinking。本阶段只做离线修复与验证，不新增真实模型执行（原额度仍为 40/40），不切 Pi 默认、不删除旧循环。
+
+1. 将新问题的累计预算/轮数调整为 60,000 tokens/10 轮；显式输入仍可收紧，旧 Turn、重试及 30 题原始记录的 30,000/6 不变。Pi 单轮输入硬上限可配置（默认 16,000），动态分配并为最终输出预留空间。
+2. 状态工具直接返回摘要；事实结果明确匹配数、展示数、截断和续查入口。查询沿用一个工具，增加准确字段、多期间、期间类型与分页，支持有限的中英文检索同义词。
+3. 从当前 Turn 的成功工具结果生成可恢复工作记录：查询条件、事实/产物定位、计算结果与未完成动作；压缩旧消息时保留，避免重查。完整可见历史仍保留审计，不作为已核实研究结论。
+4. 引用错误返回具体错误及本 Turn 可用引用 ID；模型可使用紧凑引用 ID，Python 展开后继续执行原权限/回执校验，历史报告和对外 JSON 不变。
+5. 为受限查询/函数提供具体纠正提示，计算结果附输入期间/字段/单位覆盖摘要；不猜单位，不为 30 道题写死流程，不增加第二个 Agent。
+6. 从真实失败形态建立离线回归，跑完整测试、Ruff、打包检查，写中文讲解并更新 PROGRESS。真实质量收益仍待另行授权后逐因素复测。
+
+实际离线结果与实现边界见 [可靠性修复说明](docs/32-pi-agent-reliability.md)。本阶段完成后暂停；原 30 题质量统计不改写，新增真实执行为 0。
+
+## 2026-10-09：Pi SDK 开放问答迁移（用户已确认，实施中）
+
+本次用户明确批准以下调整，覆盖旧文档中“纯 Python Agent / 暂不引入 Pi runtime”的阶段限制；固定研究方法、账户/交易禁令和报告冻结规则不变。
+
+- 架构：Python 研究核心与 CLI + 项目自带 Node >=22.19 的 Pi 运行进程；锁定 `@earendil-works/pi-ai`、`@earendil-works/pi-agent-core` 0.83.0，不依赖 pi-learning、Pi CLI、OpenCode 或用户全局 Pi 配置。不引入 pi-coding-agent、多 Agent、LangGraph、Web UI。
+- 范围：完整迁移 ask、ask-followup、ask-respond、ask-retry、ask-interrupt 与 chat 交互问答路径；保留命令、最终 JSON、Session/Turn/Attempt、不可变报告与显式 Memo。固定研究 Writer 和 Router 保留 Python 实现。
+- Pi 接管原生模型/工具循环、消息和事件；Python 继续权威处理工具 schema/授权、来源与公司范围、证据回执、计算、累计预算、状态与事务。Pi turn 是一次模型调用，不等同于用户目标 AgentTurn。首版顺序工具执行。
+- 会话：Python 在 data/ 下统一保存规范化用户/可见助手/工具调用 ID、参数、结果摘要及产物引用；不保存隐藏推理、密钥、完整请求正文或完整工具结果。Pi 内存状态从项目记录重建，不另外建立默认 Pi 会话文件。重试不刷新预算，不盲目重放成功工具。
+- 历史：来源、正式报告、Memo 与成功回答保持可读且正文不改；旧未完成问题允许重新发起，不承诺跨运行时原位恢复。
+- 验收：离线权限、冻结隔离、预算、失败/等待/重试/中断、迁移与 fake-model 回归全部通过。仅对新 Pi Agent 在隔离副本执行现有 30 题各一次，另最多 10 次冒烟/定向复测；累计最多 40 次真实问题执行，每 Turn 沿用默认 30,000 tokens，不自动提高。显式记录执行计数、数值/期间/单位/引用/计算路径、token、延迟、缺口与失败。
+- 不以 completed 或平均通过率代替研究验收。可核验的数值、单位、期间、引用与计算路径错误必须修复复测；真实资料缺失并诚实说明可通过。额度耗尽仍有阻塞项时记录限制，不宣称验收通过、不切默认。通过后默认使用 Pi 并移除旧通用循环。
+- 交付：代码、必要测试、中文讲解、规格与 PROGRESS 更新；本阶段结束暂停，不顺手实施公司库后续优化或新的产品功能。
+
+实施顺序：保存当前基线 → 项目内 Pi 依赖/受控进程协议 → Python 生命周期与原生工具适配 → 规范化记录/恢复与预算 → 离线回归 → 限额真实题集与定向修复 → 默认切换及清理/教学交接。所有结果以实际运行记录为准。
+
+2026-10-09 实际结果：Pi 预览实现落地；40/40 次真实额度耗尽，30题最后一次质量为4通过/5部分/21失败。质量验收未通过，默认切换和旧loop删除未执行。下一步修复已记录阻塞并经用户另行授权复测，不自动重置额度。详见 [验收记录](docs/31-pi-agent-evaluation.md)。
+
+状态：阶段 1–18、阶段 19A 调用轨迹与可选 Phoenix 观测、阶段 19B Skill 驱动的受控工具路由、阶段 19C Turn 级 QueryWorkspace、阶段 19D.1 最小运行时已实现；阶段 16.1 已修复富途嵌套年度字段、年报页级检索和年报 Capex 输入；三家重写草稿均通过当前校验，中国移动的 Q09 状态标签已在可恢复重试中修正。三家公司均保持 draft，等待用户进行真实验收后决定是否冻结。阶段 17 已完成按需 Skill Catalog、Capability Registry、执行审计和 Writer/Agent 上下文加载。阶段 18 已扩展既有 Python Agent loop：来源仲裁、工作记忆、长期记忆索引与受限 `AnalysisWorkspace` 均已落地；不引入 LangGraph、多 Agent 或 Pi runtime。
 目标：在独立项目中，从零实现可追溯的单股公司研究与手动复评，每阶段提供可运行代码和中文讲解。
 
 ## 1. 已确认决策
@@ -161,7 +208,7 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 
 - 六组 EvidencePack、Provider 定向抽取、PDF/文本确定性排序和证据缺口。
 - Decimal 可信计算：净利润同比、资本开支/收入、ROE 序列与波动摘要；模型不能覆盖 Python 结果。
-- `write-draft` 默认 staged：六组 Answers、一次综合判断、语义审查、最多 5 个单元各修订一次和最终审查；每次尝试硬上限 14 调用。
+- `write-draft` 默认 staged：六组 Answers、一次综合判断、语义审查、最多 5 个单元各修订一次和最终审查；每次尝试硬上限 15 调用。
 - schema v6 增加 `draft_sections` 与 `draft_reviews`；分组按输入哈希恢复，草稿改变使旧审查失效。
 - 新 standard run 的 `finish` 需要 matching passing review；完成后冻结 `quality-review.json`。schema v5 旧 run 不受影响。
 - 新增 `review-draft`、`--strategy staged|one-shot`，`status` 显示分组、预算、草稿哈希和审查状态。
@@ -173,6 +220,14 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 - 在 schema v7 增加本地 FTS5 页级索引；每题先保留证据，再在固定字符和来源配额内扩展，避免高频词挤掉其他问题。
 - 从年报的明确当年 Capex 披露计算 Capex/收入，现金流购买资产仅作为单独标明的 proxy；三家电信均恢复 2021–2025 的比率序列。
 - 重写三份草稿并人工核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23；不自动 `finish`。完成后更新真实结果并暂停。
+
+### 阶段 16.2：固定流程可靠性收口（已完成，2026-10-06）
+
+- 分组 Writer 的 Prompt、JSON Schema、解析、缓存和修订统一为 `AnswerSection` 对象契约；非法 JSON 不再被内部 Statement/Gap 掩盖成空分组。
+- 非法 JSON 从原证据输入重新生成一次；精确 G/M ID 映射可无损归一化，其他结构仍由 Pydantic 拒绝。
+- DraftReview error 与 Python 硬校验 error 进入同一受限修订循环；不升级 context、不放宽来源边界。
+- `chat` 保存失败步骤和恢复动作，同一 session 重试复用原 run、采集资料和成功分组；finish 失败同样保留诊断。
+- 腾讯、中国移动、中国电信真实自然语言流程通过 validate；隔离副本的首次及重复 finish、24/6/6 覆盖和产物哈希均通过，原 run 保持 draft。详见 [docs/18-fixed-flow-reliability.md](docs/18-fixed-flow-reliability.md)。
 
 ### 阶段 17：Skill 按需加载（已完成，2026-10-04）
 
@@ -191,11 +246,92 @@ Python 3.11、uv、Pydantic 2、sqlite3、argparse、pytest；requests、pypdf�
 - 新增 `analysis_workspace` capability 和同名 Skill。它优先调用项目可信计算；不足时只对最小只读 JSON 副本执行受限 Python AST，记录数据集/代码哈希、结果和来源，限制十秒、256 MB、64 KB 输出以及每 session 三次执行。
 - `memory-search`、`memory-read` 和扩展后的 `ask-status` 可检查保存内容、Scratchpad、计算与分析审计。详见 [docs/15-open-question-agent.md](docs/15-open-question-agent.md)。
 
-### 阶段 19–21：新数据、运行时评估与专业能力（长期）
+### 阶段 19A：调用轨迹与可选本地观测（已完成，2026-10-05）
 
-- 阶段 19 按需求增加 SEC XBRL、同行、估值、OCR、新数据源和专题 Skill；先定方法和验收，再增加 capability。OCR 只处理原生提取失败或表格严重损坏的页。
-- 阶段 20 先以二十个开放问题比较当前 Python loop 与 `AnalysisWorkspace`，再按门槛比较 Pi Agent Core、Pi + 虚拟文件系统/受限 shell，以及需要更强隔离时的容器/E2B；Pi 若采用，只替换开放问题的 orchestration/runtime。
-- 阶段 21 从完成报告确定性生成带来源、as_of 和失效条件的事实记忆；只有质量或延迟有明确收益时，才用 `asyncio.TaskGroup` 加入最多三名受控 worker。Python 研究核心继续权威。
+- schema v9 新增本地 `traces` / `trace_spans`；Writer、Reviewer、Router 和交互 Agent 均记录默认不含正文的调用树。用户可显式设置 `WONDER_TRACE_CAPTURE_CONTENT=preview|full`，仅让本机 OTLP/Phoenix 显示可见 LLM/工具 I/O；项目 SQLite 仍不记录正文，隐藏推理和凭据永不采集。
+- `trace-read RUN_ID`、`agent-trace SESSION_ID` 是独立的只读排查入口；`agent_events` 继续是业务审计而非 trace 可视化替代。
+- 可选 OpenTelemetry OTLP/HTTP exporter 可以把同一安全 span 发给本地 Phoenix；Agent 额外记录 Skill、iteration、decision 与工具节点，核心流程不依赖 Phoenix、Langfuse 或任何外部宿主。
+
+### 阶段 19B：Skill 选择受控函数（已实现，2026-10-05）
+
+- 新增 `tool_registry.py`，集中管理稳定工具 ID、描述、Pydantic 参数 schema、适用 capability、默认可见状态和 Python handler；没有 handler 的工具不能进入模型 schema。
+- `skill.json` 可选声明 `tools`；catalog 拒绝未知/重复 ID、方法 Skill 声明工具和 capability 不兼容的 grants。`analysis-workspace` 通过 manifest 组合财务查询、可信计算、临时数据集、受限代码与结果读取；无需改 Agent loop。
+- `chat` 按所选 Skill 生成本次 allowlist，只向开放问题 Agent 发送获准工具的 JSON Schema；执行时以同一 allowlist 二次检查。tool ID、Skill audit、allowlist 和 registry version 保存在 session event/trace。
+- `ask-followup` 会重新加载 Skill 并检查 Skill audit、工具集合与 registry 版本；已有固定研究 Skill 元数据和旧 Agent session 可按兼容规则恢复。直接 `ask` 保留原有完整工具集合。
+- Fixed Research 流程未改变；Agent loop 的迭代、预算、计算限制、证据引用和正式报告隔离规则未改变。
+- 验收：新增工具 Skill、未知/不兼容工具拒绝、Agent prompt 与执行 allowlist 一致、未绑定 handler 的工具不可见、follow-up 检出授权变化；全量离线测试和 Ruff 通过。没有调用真实模型/OpenD/证券账户，也没有修改正式报告。
+
+### 阶段 19C：交互式 QueryWorkspace（已完成，2026-10-06）
+
+本阶段只扩展开放问题 Agent 的受控分析能力，不混入新用户上手、开源包装或评测。固定 `ResearchRun`、评分、门闸、Writer、`validate` 和 `finish` 完全不变。19C 没有重写完整 runtime；它先建立最小的 Turn 数据边界，使 SQL 配额、产物与证据不必在 19D 从 session 语义迁移。
+
+已完成的内部准备（2026-10-06）：既有 `agent.py` 已按不可变策略/动态 prompt、Tool handler、Scratchpad/记忆和主循环拆为小模块，保持 CLI、SQLite、Tool/Skill 授权与输出行为不变。它不实现 Turn、Attempt、SQL 或恢复语义，只降低后续 19C/19D 改动相互缠绕的风险。
+
+**已实现：最小 Turn 契约和 QueryWorkspace。**
+
+- 每次 `ask` 或 `ask-followup` 创建一个不可变的 `AgentTurn`，记录用户输入、ticker/run、Skill/allowlist、provider/model、预算策略和创建时间；`AgentSession` 仍只是长期对话容器，`chat_sessions` 仍只是自然语言入口的确认/恢复状态，三者不能混用。
+- schema v10 同时让分析产物和证据回执关联 `session_id + turn_id`。已有 session 按显式迁移补一条 `legacy` turn，只补元数据，不重写事件、报告、Memo 或正式研究内容。完整的 Attempt、重试、恢复命令和模型适配层仍属于 19D。
+- SQL、函数和连续失败的资源上限从“每 session”改为“每 Turn”；如需 session 总上限，必须单独、显式记录，重试不得藉此获得新的完整预算。这样后续 Attempt 只消耗同一 Turn 的剩余预算。
+
+- 交互 Agent 的顺序固定为：可信计算优先；不足时在当前 session/ticker/run 的隔离只读财务事实快照上执行单条 `SELECT` / `WITH … SELECT`；必要时才对该 SQL 结果运行受限 Python 函数。文本问题继续使用既有来源搜索和分段阅读。
+- schema v10 扩展 `analysis_runs`，并新增实际工具证据的 `agent_evidence_receipts`。每次分析保存在 `data/tmp/analysis/<session>/<turn>/<analysis>/`；保存快照、schema、SQL、可选函数和完整结果，SQLite 只留相对路径、状态、限制、哈希、来源引用和有界摘要。
+- 快照仅含结构化 `financial_facts` 和最小 `source_metadata`，不含来源全文、正式报告或 Memo；事实使用稳定 `fact_id`，保留原始 Decimal 文本。快照至多 10,000 条事实，写完改为只读；查询子进程以只读 immutable SQLite 打开。
+- Tool Registry/`analysis-workspace` Skill 升级为 v3，新增 `describe_analysis_schema`、`run_readonly_sql`、`run_analysis_function` 和 `read_analysis_artifact`。旧的 JSON 数据集/代码工具仅供旧 session、直接 `ask` 和兼容测试保留，不再暴露给新版 Skill。
+- SQL 最长 12,000 字符，最多返回 400 行；独立子进程、SQLite authorizer、`query_only`、progress handler 与既有 10 秒、256 MB、64 KB 输出限制共同拒绝 DDL、写操作、PRAGMA、ATTACH/DETACH、扩展加载、事务和多语句。每个 Turn 最多六次 SQL 尝试、三次函数执行。
+- 直接返回 `fact_id` 的行由程序反查真实 `source_id + locator`，才标为 `citable=true`；聚合或未返回原始事实行的 SQL 仅供探索。最终临时报告引用还必须匹配同一 Turn 的证据回执，拒绝编造、跨 Turn 或来源版本不一致的 locator。
+- 临时函数只能提交 `def analyze(rows): … return {...}`，只能处理对应 SQL 已存档的结果行。允许局部变量、条件、循环和受控数值/分组函数；禁止 import、属性访问、while、递归、lambda、class、异常处理、文件、网络、SQLite、环境变量、shell 和动态执行。
+- SQL/函数的语法、校验、超时和输出错误以结构化可恢复错误反馈给模型；同一错误不得在同一 Turn 原样重复。连续三次分析工具失败才结束该 Turn。查询正文不反复塞入上下文，只保留预览、artifact ID、哈希、行数与来源摘要。
+- 验收覆盖 v9→v10 迁移与 legacy turn、快照隔离、SQL/AST 越权拒绝、资源/次数限制、可引用性、函数计算、错误恢复、真实工具回执和端到端 fake-model 路径；19C 专属与 Agent 聚焦离线测试、Ruff 均通过。全量离线 pytest 目前仅余一个既有 Writer 调用预算测试失败，未混入无关 Writer 修改；真实 DeepSeek smoke 未运行，单独记录其限制。实现说明见 [docs/21-query-workspace.md](docs/21-query-workspace.md)。
+
+### 阶段 19D：交互 Agent 最小运行时、上手与面试案例
+
+本阶段在 19C 已建立的 Turn 边界上，把已有单 Agent loop 的执行语义补全为可恢复的最小运行时，再把项目整理成可演示、可复现的开源作品。它不复制 Dayu 的完整 Host/EventLog/队列体系，也不引入多 Agent、Pi、LangGraph 或外部宿主。
+
+**19D.1 最小运行时（已实现，2026-10-07）：**
+
+- 明确区分 `AgentSession`（长期对话容器）、`AgentTurn`（一次用户目标和不可变授权/预算快照）与 `AgentAttempt`（一次实际执行或重试）；`ask-followup` 创建新 Turn，不能再以覆盖式 session 结果替代历史回答。
+- 为 Turn/Attempt 定义受控状态和合法迁移：Turn 使用 `created → running → waiting_user|succeeded|failed|budget_exhausted|interrupted`，Attempt 保存开始/结束时间、结构化错误和已知消耗；未知用量保留保守预算预留。重试或补充等待中的用户信息都创建新 Attempt，不恢复旧 Python 调用栈，也不重置 Turn 的预算。
+- 把 `agent_events`、analysis 产物、证据回执和 trace 关联到 Turn/Attempt；`interactive_reports` 改为按 Turn 保存不可变结果，Memo 保留来源 session 并补充来源 Turn/Report。旧 session、事件和报告以显式 migration 兼容，不能丢失或改写历史内容。
+- 明确 CLI 语义：`ask` 创建 Turn，`ask-followup` 创建新的实质问题 Turn；等待用户补充和失败重试必须带目标 Turn ID（例如 `ask-respond`、`ask-retry`），`ask-status` 输出 Turn/Attempt 时间线。相同工具和参数在同一 Attempt 不重复执行；后续 Attempt 只能引用已成功的受控产物，或在上次失败时重新尝试。
+- 抽出小型、可替换的 `AgentModelClient` 适配层，提供 scripted/fake model；它只服务交互 Agent，不把 Writer、Router 或项目改造成通用多 provider 框架。循环、工具、等待用户、预算、失败和恢复都能离线测试。
+- 复用现有 Scratchpad、Tool Registry 和 trace；不建立通用事件溯源、后台队列、远程 worker、回放外部网络操作或 Dayu 式完整 Host/Engine 分层。
+- 验收覆盖旧数据迁移、状态迁移、attempt/报告历史、预算不因重试重置、等待用户恢复、同一工具不重复执行、Skill/allowlist 固化、trace 关联和正式 `ResearchRun` 不变。
+
+教学与实际验证见 [docs/23-agent-runtime-reliability.md](docs/23-agent-runtime-reliability.md)。仅完成本小阶段；主库未迁移，记忆/索引优化仍分阶段，19D.2 与 19E 待用户决定。
+
+2026-10-08 按用户最新指令完成额外可靠性收口：借鉴 Pi 的上下文转换和工具结果投影，接通按需富途补取与通用受限计算；原问题真实 DeepSeek smoke 已完成。保留 Python 核心，不引入 Pi runtime。下一步建议优先 19E 小型评测（含实际计算工具调用率），再决定检索/上下文后续优化。详见[通用财务问答](docs/25-agent-context-and-financial-tools.md)。
+
+**19D.2 新用户上手、开源可发现性与面试案例（待实施）：**
+
+- 精简 README 首屏，补英文 Quick Start、功能截图或示例报告、安装/配置排错、项目边界和贡献指南；让首次访问者可在数分钟内跑通演示。
+- GitHub Actions 按用户最新要求暂缓；原候选为在受支持 Python 上运行离线 pytest、Ruff 和 demo smoke，不访问网络、OpenD、账户或模型 API。
+- 增加面试案例文档，说明目标用户与痛点、为何正式研究采用固定 workflow、为何开放问题采用受控 Agent、为何使用 Python/SQLite 而非先引入 LangGraph、主要失败模式、质量/成本/信任指标，以及明确不做的能力与原因。
+- 记录安装成功率、演示完成率、Issue/PR 反馈等可观察信号，再决定是否优先开发更大功能；不开启自动发布或自动部署。
+
+### 阶段 19E：开放问题 Agent 的评测基线
+
+2026-10-08：已准备 [30 道题](docs/26-company-data-and-agent-eval.md) 与 [JSON 题集](docs/evals/interactive-agent-30.v1.json)，完整题集尚未执行。公司数据层 A、B 已完成：独立公司投影已回填；新 chat 和显式 company_latest 问题按 Turn 固定来源，支持共享查询、补取后索引、本 Turn 证据回执与双库/计算产物备份。直接 ask 的原默认范围不变。详见 [A 实现](docs/28-company-data-store.md)、[B 实现与真实冒烟限制](docs/29-company-agent-query.md)。下一步 C 执行 30 题，分别检查数值、期间/单位、引用与预算；最新原题冒烟已完成真实函数计算，但单位表述仍未完全合格，不以 completed 当作答案正确。随后 D 按测量优化。完整顺序见 [公司库计划](docs/27-company-database-plan.md)，不提前交付阶段 22 语义事实记忆。
+
+- 在 19C 与 19D 的稳定实现之上建立小型、可重复的开放问题评测：答案/计算、引用有效性、工具选择与参数、越权拒绝、预算停止和正式研究隔离分别评分。
+- 首版使用 scripted model 和合成测试输入保证离线可重复；真实模型运行作为独立 smoke，报告重复次数、通过率、token、延迟和失败类型，不进入 CI。
+- trace 用于定位失败和回归，但不把模型隐藏推理或敏感正文写入评测产物；LLM judge 只有在人工抽样校准后才用于主观完整性评分。
+- 19C 与 19D 各自仍必须交付单元、迁移、安全和 fake-model 端到端验收测试；19E 是跨场景的质量/成本基线，而不是把必要测试推迟到之后的理由。
+- 本阶段不单独扩展或评测记忆系统；Scratchpad、FTS 和记忆信任边界继续沿用阶段 18。版本化事实记忆及其专项评测仍留在阶段 22；更大规模的公开基准、Pi 和多 Agent 对比留在阶段 21。
+
+### 阶段 20–22：数据覆盖、基准与专业能力（长期）
+
+- 阶段 20 按实际使用需求增加 SEC XBRL、港交所/公司官网数据、专题来源与估值 Skill；先定研究方法、来源边界和验收样例，再增加 capability。OCR 只处理原生提取失败或表格严重损坏的页，并保留原始 PDF 与页码映射。
+- 阶段 21 建立公开、可复现的开放问题质量基准，覆盖财务序列、来源引用、时期/币种/口径、计算与证据缺口；先比较当前 Python loop 和 `AnalysisWorkspace`，再按门槛评估多模型或 Pi Agent Core。只有结果显示明确收益才引入。
+- 阶段 22 扩展专业 Skill、同行比较、估值附记、HTML/PDF 导出和版本化事实记忆；支持社区贡献的来源适配器与方法 Skill，但权限和业务规则仍由 Python Registry 控制。
+- 多 Agent 最多三名受控 worker，须在可并行题目上证明质量提升，或在质量不下降时显著降低延迟。Pi 若采用，只替换开放问题 orchestration/runtime；Python 来源校验、可信计算、SQLite 和正式报告冻结继续权威。
+
+### 面试知识与代码能力学习路线（按需教学，不阻塞实施）
+
+- **19C 前后：** 讲工具调用、受限 SQL/函数、证据回执、提示注入与最小权限；代码重点是 Pydantic 契约、SQLite authorizer、子进程资源限制和故障注入测试。
+- **19D 前后：** 讲 workflow 与 Agent 的边界、Session/Turn/Attempt、状态机、幂等、超时、取消与恢复；代码重点是状态迁移、SQLite 事务、适配器协议、`asyncio`/超时语义和 trace correlation。
+- **19E 前后：** 讲评测目标、数据集、确定性 scorer、trace grading、LLM-as-a-judge、人工校准、重复试验、成本/延迟和回归阈值；代码重点是 JSONL/fixture、统计汇总、pytest 参数化和可复现报告。
+- **阶段 22 前后：** 讲 working/episodic/semantic memory、写入门槛、检索、冲突、失效、版本化与隐私；只有实际基准显示 FTS 召回不足时才讨论 embedding 或 hybrid retrieval。
+- 不需要等阶段 19 全部完成才学习。默认在每个相关阶段开始前先做短设计讲解、完成后再按真实代码复盘；用户也可以随时单独要求某一主题的中文课程和小练习。
 
 ## 4. 每阶段完成要求
 

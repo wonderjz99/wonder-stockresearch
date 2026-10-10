@@ -28,7 +28,7 @@
 3. 相同数值记录为 `matched`；没有官方明细记录为 `provider_unverified`，在 `status` 中保留 warning。
 4. 不同数值记录为 `conflict`，官方值在证据选择时优先。草稿必须在 `conflicts` 中明确记录并说明已解决；否则 `validate` 和 `finish` 返回 `unresolved_source_conflict`。
 
-PDF 原文没有可靠结构化表格时，程序不猜测其数值。阶段 19 再评估局部 OCR 与表格提取。
+PDF 原文没有可靠结构化表格时，程序不猜测其数值。局部 OCR 与表格提取属于阶段 20 的数据覆盖评估，不因开放问题 Agent 扩展而提前引入。
 
 ## 3. 富途采集调整
 
@@ -57,7 +57,7 @@ wonder-research --root <项目根> ask-status <SESSION_ID>
 
 `ask-status` 显示 Scratchpad revision、使用过的记忆、可信计算记录和临时分析审计。
 
-## 5. AnalysisWorkspace
+## 5. AnalysisWorkspace（兼容路径）与 QueryWorkspace
 
 开放问题的工具顺序是：
 
@@ -65,9 +65,10 @@ wonder-research --root <项目根> ask-status <SESSION_ID>
 选择 Skill
 → 读取归档富途/官方数据
 → run_trusted_calculation
-→ 必要时 create_analysis_dataset
-→ run_analysis_code
-→ read_analysis_result
+→ 必要时 describe_analysis_schema
+→ run_readonly_sql
+→ 可选 run_analysis_function
+→ read_analysis_artifact
 → InteractiveReport
 ```
 
@@ -76,34 +77,39 @@ wonder-research --root <项目根> ask-status <SESSION_ID>
 - `query_archived_financials`
 - `search_archived_sources`
 - `run_trusted_calculation`
-- `create_analysis_dataset`
-- `run_analysis_code`
-- `read_analysis_result`
+- `describe_analysis_schema`
+- `run_readonly_sql`
+- `run_analysis_function`
+- `read_analysis_artifact`
 
-数据集位于 `data/tmp/analysis/<session>/<execution>/input.json`，是最小化的只读 JSON 副本。每个 session 最多三次分析执行。代码只接受受限 Python AST：没有 `import`、属性访问、动态执行、shell、网络、SQLite 或任意文件读取；运行子进程不继承 API Key，限制为十秒、256 MB、64 KB 输出和有限文件描述符。代码必须赋值 JSON 兼容的 `result`。
+19C 的快照位于 `data/tmp/analysis/<session>/<turn>/<analysis>/snapshot.db`，是只含结构化财务事实的最小 SQLite 副本。SQL 在 immutable 只读子进程中执行，每个 Turn 最多六次；可选函数只处理对应 SQL 行，每个 Turn 最多三次。函数只接受受限的 `def analyze(rows): ... return {...}`，没有 `import`、属性访问、动态执行、shell、网络、SQLite 或任意文件读取；子进程不继承项目环境变量，限制为十秒、256 MB、64 KB 输出和有限文件描述符。引用还必须命中当前 Turn 的实际工具回执。完整规则见 [Turn 级 QueryWorkspace](21-query-workspace.md)。
 
-这个 AST 运行器提供应用层限制和审计，不取代操作系统级隔离。需要处理不可信的大型代码、二进制工具或真实网络时，阶段 20 的容器/E2B 评估才是对应路径。
+旧 `create_analysis_dataset`、`run_analysis_code`、`read_analysis_result` 仍供直接 `ask` 和历史 session 兼容，但不出现在新版 `analysis-workspace` Skill 的授权集合中。
+
+这个 AST 运行器提供应用层限制和审计，不取代操作系统级隔离。需要处理不可信的大型代码、二进制工具或真实网络时，后续基准证明需求后才评估容器/E2B。
 
 临时结果不能修改 `ResearchRun`、草稿、Gate、Moat、评分或 `finish`。只有用户显式调用 `memo-save` 才会把一个观察变成长期 Memo。
 
 ## 6. 与 Pi Agent Core 的关系
 
+2026-10-08 更新：按用户指令，固定计算器改为快捷路径；缺数据时可补取富途财务资料，由模型选择 SQL/受限函数。Pi 上下文转换边界已在 Python 实现，未迁移 runtime。详见[通用财务问答](25-agent-context-and-financial-tools.md)。下文保留阶段 18–19C 的设计背景。
+
 Pi 的 `transformContext`、事件流、工具生命周期和会话压缩是本阶段的参考来源：本项目使用了相同的问题拆解方向，但由 Python 保持工具权限、SQLite、来源定位和报告冻结。Pi 本身不提供文件、进程、网络或凭据隔离，因此当前不迁移 runtime。
 
 ## 7. 后续路线和评估门槛
 
-### 阶段 19：新数据源与 PDF/OCR
+### 阶段 19C：QueryWorkspace（已完成）
 
-- 接入 SEC `submissions`/XBRL `companyfacts`，并评估富途的高管、股东、内部人、财报和公告发现接口。
-- 官网 HTML/XBRL 优先；只对原生 PDF 提取失败或表格严重损坏的页面局部 OCR。
-- 用同一组中英文年报页比较 OCRmyPDF、Docling、PaddleOCR PP-StructureV3 与 MinerU，按文字/表格正确率、页码映射、耗时、硬件和许可证选择一个默认后端。
+每次 `ask`/`ask-followup` 现在建立最小 `AgentTurn`，使快照、工具证据和资源配额归属一个用户问题，而非整个 session；完整 Attempt/retry runtime 仍留在 19D。可信计算优先；不足时才在当前 session/turn/ticker/run 的隔离财务事实快照上使用只读 SQL 和受限函数，并以同一 Turn 的工具证据回执绑定最终引用。它不增加外部数据源、OCR、多 Agent 或新的正式研究写入路径。实现与教学说明见 [Turn 级 QueryWorkspace](21-query-workspace.md)。
 
-### 阶段 20：受控多 Agent 与 Pi 对比
+### 阶段 19D：最小运行时与上手材料
 
-先用二十道开放问题比较当前 Python loop 与 Python loop + AnalysisWorkspace。只有独立子问题足够多，且最多三个 `asyncio.TaskGroup` worker 能提高引用完整率/正确率，或质量不降而把延迟降低至少 25%，才实现 Coordinator、Data、Document、Analysis 与 Verifier 的受控分工。
+在 19C 的 Turn 契约上加入 Attempt，定义状态、恢复、预算消耗和 attempt 审计；临时报告按 Turn 保留而非被 follow-up 覆盖，等待用户补充或重试都显式指定目标 Turn。再补离线演示、英文 Quick Start、CI 和面试案例。只借鉴 Dayu 对执行生命周期的概念，不引入完整 Host/EventLog/队列。
 
-随后在相同基准比较 Python loop、Pi Agent Core + Python capabilities、Pi + 虚拟文件系统/受限 shell，以及需要强隔离时的容器/E2B。Pi 只有在会话控制、恢复、工具编排和维护成本上取得明确优势时，才替换开放问题的 orchestration 层。
+### 阶段 19E：评测基线
 
-### 阶段 21：专业 Skill 与语义记忆
+在稳定的 QueryWorkspace 和 runtime 上，以 scripted model 与离线 fixture 评测答案/计算、引用、工具选择、越权拒绝、预算和正式研究隔离。真实模型只做独立重复 smoke；这不取代 19C/19D 各自必须交付的单元、迁移、安全和 fake-model 端到端测试。记忆专项评测暂不排入本阶段。
 
-按需求加入同行竞争、独立估值 Q25–Q28/G4、监管/市场份额/留存专题数据源。完成报告可确定性生成带来源、`as_of` 和失效条件的 Company Fact；用户偏好只允许显式配置保存，事实采用版本化和失效标记，不静默覆盖历史证据。
+### 阶段 20–22：数据、公开基准与语义记忆
+
+阶段 20 按需要接入 SEC XBRL、官网/交易所资料与局部 OCR；阶段 21 用公开、可复现的开放问题基准比较 Python loop、QueryWorkspace、Pi 或最多三个受控 worker，只有质量提升或质量不降且延迟至少降低 25% 才增加复杂度；阶段 22 再加入专业 Skill、估值附记和带来源、`as_of`、失效条件的版本化事实记忆及其专项评测。

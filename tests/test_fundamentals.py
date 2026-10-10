@@ -5,7 +5,8 @@ from pathlib import Path
 from types import ModuleType
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import futu_fundamentals, research, storage
+from wonder_stockresearch import futu_fundamentals, storage
+from wonder_stockresearch.fixed import research
 from wonder_stockresearch.models import ResearchPacket
 from wonder_stockresearch.sources import SourceError
 
@@ -36,7 +37,11 @@ def fake_payload() -> dict[str, dict]:
         ),
         "statements": d(
             "statements",
-            {"statements": {"1": {"label": "利润表", "report_list": [{"date_time_str": "2025-12-31"}]}}},
+            {
+                "statements": {
+                    "1": {"label": "利润表", "report_list": [{"date_time_str": "2025-12-31"}]}
+                }
+            },
             available_from="2025-12-31",
             currency="CNY",
             accounting_standard="国际会计准则",
@@ -65,7 +70,9 @@ def fake_payload() -> dict[str, dict]:
 class FakeFundamentalsProvider:
     name = "futu"
 
-    def __init__(self, data: dict[str, dict] | None = None, error: SourceError | None = None) -> None:
+    def __init__(
+        self, data: dict[str, dict] | None = None, error: SourceError | None = None
+    ) -> None:
         self.data = data if data is not None else fake_payload()
         self.error = error
         self.closed = False
@@ -85,9 +92,7 @@ def test_collect_fundamentals_archives_sources_and_steps(tmp_path: Path) -> None
     run_id = str(research.start_run(root, "SYNTHETIC")["run_id"])
     provider = FakeFundamentalsProvider()
 
-    data, issues = research.collect(
-        root, run_id, "fundamentals", fundamentals_provider=provider
-    )
+    data, issues = research.collect(root, run_id, "fundamentals", fundamentals_provider=provider)
 
     assert issues == []
     assert data["succeeded"] == len(research.FUNDAMENTAL_TASKS)
@@ -97,7 +102,9 @@ def test_collect_fundamentals_archives_sources_and_steps(tmp_path: Path) -> None
     datasets = {source["metadata"].get("dataset") for source in listed}
     assert {"statements", "dividends", "executives"} <= datasets
     assert "valuation" not in datasets and "consensus" not in datasets
-    statements = next(source for source in listed if source["metadata"].get("dataset") == "statements")
+    statements = next(
+        source for source in listed if source["metadata"].get("dataset") == "statements"
+    )
     assert statements["metadata"]["available_from"] == "2025-12-31"
     assert statements["metadata"]["evidence_class"] == "reported"
     assert statements["metadata"]["currency"] == "CNY"
@@ -110,11 +117,11 @@ def test_collect_fundamentals_blocked_when_provider_unavailable(tmp_path: Path) 
     """Crashing instead of recording blocked steps must fail this test."""
     root = make_root(tmp_path)
     run_id = str(research.start_run(root, "SYNTHETIC")["run_id"])
-    provider = FakeFundamentalsProvider(error=SourceError("opend_unavailable", "无 OpenD", blocked=True))
-
-    data, issues = research.collect(
-        root, run_id, "fundamentals", fundamentals_provider=provider
+    provider = FakeFundamentalsProvider(
+        error=SourceError("opend_unavailable", "无 OpenD", blocked=True)
     )
+
+    data, issues = research.collect(root, run_id, "fundamentals", fundamentals_provider=provider)
 
     assert data["blocked"] == len(research.FUNDAMENTAL_TASKS)
     assert research.get_status(root, run_id)["source_count"] == 0
@@ -148,7 +155,10 @@ def test_period_after_as_of_provider_cannot_support() -> None:
             "kind": "provider",
             "published_at": None,
             "publication_precision": "unknown",
-            "metadata": {"available_from": "2026-12-31", "observed_at": "2026-09-21T00:00:00+00:00"},
+            "metadata": {
+                "available_from": "2026-12-31",
+                "observed_at": "2026-09-21T00:00:00+00:00",
+            },
         }
     )
 
@@ -159,7 +169,7 @@ def test_period_after_as_of_provider_cannot_support() -> None:
 
 def test_writer_context_includes_provider_json(tmp_path: Path) -> None:
     """Feeding only the first 4000 chars of provider JSON (truncated) must fail this test."""
-    from wonder_stockresearch import writer
+    from wonder_stockresearch.fixed import writer
     from wonder_stockresearch.models import Source
 
     root = make_root(tmp_path)
@@ -183,15 +193,17 @@ def test_revenue_breakdown_archives_ten_annual_and_three_interim_periods(
     futu_module.RET_OK = 0
     monkeypatch.setitem(sys.modules, "futu", futu_module)
 
-    screen_dates = [
-        {"date": year, "period_text": f"{year}/FY", "financial_type": "F10Type_Annual"}
-        for year in range(2016, 2026)
-    ] + [
-        {"date": year + 100, "period_text": f"{year}/H1", "financial_type": "F10Type_Q6"}
-        for year in (2024, 2025, 2026)
-    ] + [
-        {"date": 900, "period_text": "2026/Q1", "financial_type": "F10Type_Q1"}
-    ]
+    screen_dates = (
+        [
+            {"date": year, "period_text": f"{year}/FY", "financial_type": "F10Type_Annual"}
+            for year in range(2016, 2026)
+        ]
+        + [
+            {"date": year + 100, "period_text": f"{year}/H1", "financial_type": "F10Type_Q6"}
+            for year in (2024, 2025, 2026)
+        ]
+        + [{"date": 900, "period_text": "2026/Q1", "financial_type": "F10Type_Q1"}]
+    )
 
     class FakeContext:
         def __init__(self) -> None:
@@ -250,7 +262,15 @@ def test_statements_follow_next_key_and_keep_at_most_twenty_unique_annual_period
         def __init__(self) -> None:
             self.calls: list[tuple[int, str | None, int]] = []
 
-        def get_financials_statements(self, ticker: str, *, statement_type: int, financial_type: object, next_key: str | None, num: int):
+        def get_financials_statements(
+            self,
+            ticker: str,
+            *,
+            statement_type: int,
+            financial_type: object,
+            next_key: str | None,
+            num: int,
+        ):
             self.calls.append((statement_type, next_key, num))
             year = "2025" if next_key is None else "2024"
             return 0, {

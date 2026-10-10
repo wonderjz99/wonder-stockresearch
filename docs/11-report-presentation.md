@@ -48,7 +48,7 @@ ResearchDraft + 已归档来源
 
 ## 代码入口
 
-- `src/wonder_stockresearch/reports.py`：问题文本、枚举中文映射、数字与引用格式、来源索引以及 `render_company`。
+- `src/wonder_stockresearch/fixed/reports.py`：问题文本、枚举中文映射、数字与引用格式、来源索引以及 `render_company`。
 - `src/wonder_stockresearch/cli.py`：`_finish_summary` 组装完成摘要；`_print_chat_response` 在固定研究完成时调用相同摘要；`finish` 根据 stdout 是否为 TTY 选择人类可读摘要或 JSON。
 - `research.finish_run` 仍负责校验、渲染正式产物、计算哈希并冻结 run。CLI 不改写数据库或报告内容。
 

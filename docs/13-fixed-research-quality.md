@@ -34,6 +34,10 @@ Python 会拒绝越界审查引用，并只对可机械识别的审查误报调�
 
 `answered` 表示该题没有未解决的证据缺口，因此 `gap` 必须为 `null`。`partial` 或 `missing` 必须保留完整 gap。该规则同时由分组缓存复用和 `validate` 执行，避免旧草稿因状态标签错误而进入 finish。
 
+分组写作现以 Pydantic `AnswerSection={answers:[...]}` 作为唯一顶层契约，Prompt、JSON Schema、解析器、缓存和修订共同使用。外层 JSON 损坏时只接受完整连续 Answer 对象，不再扫描内部 Statement/Gap 后误报“实际为空”。非法 JSON 的一次修复从原 EvidencePack 重新生成；结构和覆盖错误继续只能做受控结构修复。
+
+初次 DraftReview 后，程序会把可映射到 `draft.answers/gates/moats/challenge/conclusion/conflicts` 的确定性校验 error 合并进同一批定向修订。缺 `eligible supports` 时只能删除无支持陈述，或把答案降为 partial/missing 并补 gap；不能把 context 自动改为 supports。chat 会保存失败步骤和原 run，同一 session 的“重试”复用成功分组与已归档来源。
+
 schema v6 新增：
 
 - `draft_sections`：按 `run_id + section_key + input_hash` 保存成功分组，失败后重试复用已完成组。

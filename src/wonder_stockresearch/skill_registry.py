@@ -14,7 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import capabilities
+from wonder_stockresearch import capabilities
+from wonder_stockresearch.interactive import tool_registry
 
 
 class SkillRegistryError(Exception):
@@ -33,6 +34,7 @@ class _Manifest(BaseModel):
     applies_to: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
     prompt_resources: list[str] = Field(default_factory=list)
 
 
@@ -57,6 +59,7 @@ class SkillSummary:
     applies_to: tuple[str, ...]
     dependencies: tuple[str, ...]
     capabilities: tuple[str, ...]
+    tools: tuple[str, ...]
     prompt_resources: tuple[str, ...]
     content_hash: str
     diagnostics: list[SkillDiagnostic] = field(default_factory=list)
@@ -75,6 +78,7 @@ class SkillSummary:
             "applies_to": list(self.applies_to),
             "dependencies": list(self.dependencies),
             "capabilities": list(self.capabilities),
+            "tools": list(self.tools),
             "content_hash": self.content_hash,
             "available": self.available,
             "diagnostics": [item.to_dict() for item in self.diagnostics],
@@ -93,7 +97,11 @@ class LoadedSkill:
             "version": self.summary.version,
             "content_hash": self.summary.content_hash,
             "kind": self.summary.kind,
+            "applies_to": list(self.summary.applies_to),
+            "dependencies": list(self.summary.dependencies),
             "capabilities": list(self.summary.capabilities),
+            "tools": list(self.summary.tools),
+            "prompt_resources": list(self.summary.prompt_resources),
         }
 
 
@@ -199,6 +207,7 @@ def catalog(root: Path) -> SkillCatalog:
             applies_to=(),
             dependencies=(),
             capabilities=(),
+            tools=(),
             prompt_resources=(),
             content_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         )
@@ -210,13 +219,23 @@ def catalog(root: Path) -> SkillCatalog:
         summary.applies_to = tuple(manifest.applies_to)
         summary.dependencies = tuple(manifest.dependencies)
         summary.capabilities = tuple(manifest.capabilities)
+        summary.tools = tuple(manifest.tools)
         summary.prompt_resources = tuple(manifest.prompt_resources)
         if len(set(summary.dependencies)) != len(summary.dependencies):
             _append(summary, "duplicate_dependency", "dependencies 不能重复")
         if len(set(summary.capabilities)) != len(summary.capabilities):
             _append(summary, "duplicate_capability", "capabilities 不能重复")
+        if len(set(summary.tools)) != len(summary.tools):
+            _append(summary, "duplicate_skill_tool", "tools 不能重复")
         if summary.kind == "method" and summary.capabilities:
             _append(summary, "method_declares_capability", "method Skill 不能声明 capabilities")
+        if summary.kind == "method" and summary.tools:
+            _append(summary, "method_declares_tools", "method Skill 不能声明可执行工具")
+        if summary.tools:
+            try:
+                tool_registry.validate_skill_tools(summary.tools, summary.capabilities)
+            except tool_registry.ToolRegistryError as error:
+                _append(summary, error.code, error.message)
         if summary.kind == "capability" and not summary.capabilities:
             _append(summary, "capability_missing_binding", "capability Skill 必须声明至少一个 capability")
         resources: list[tuple[str, str]] = []
@@ -358,6 +377,11 @@ def validate_for_capability(root: Path, names: list[str], capability_name: str) 
                 "skill_capability_mismatch",
                 f"Skill {summary.name} 声明的 capability 不包含：{capability_name}",
             )
+        if summary.tools:
+            try:
+                tool_registry.validate_skill_tools(summary.tools, (capability_name,))
+            except tool_registry.ToolRegistryError as error:
+                raise SkillRegistryError(error.code, error.message) from error
     return selected
 
 
@@ -369,6 +393,19 @@ def load_for_capability(root: Path, names: list[str], capability_name: str) -> t
 
 def selection_audit(loaded: tuple[LoadedSkill, ...]) -> list[dict[str, object]]:
     return [item.audit_dict() for item in loaded]
+
+
+def execution_tool_ids(loaded: tuple[LoadedSkill, ...], capability_name: str) -> tuple[str, ...]:
+    """合并 capability 默认工具与所选 Skill 授权，供 Agent prompt 和执行器共用。"""
+    requested: list[str] = []
+    for item in loaded:
+        for tool_id in item.summary.tools:
+            if tool_id not in requested:
+                requested.append(tool_id)
+    try:
+        return tool_registry.granted_tool_ids(requested, capability_name)
+    except tool_registry.ToolRegistryError as error:
+        raise SkillRegistryError(error.code, error.message) from error
 
 
 def execution_context(loaded: tuple[LoadedSkill, ...]) -> str:

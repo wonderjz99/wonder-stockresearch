@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import agent, research, storage
+from wonder_stockresearch import agent, observability, storage
+from wonder_stockresearch.fixed import research
 from wonder_stockresearch.models import (
     EvidenceRef,
     InteractiveQuestion,
@@ -122,11 +124,24 @@ def test_interactive_agent_reads_archived_source_before_final_answer(
 
     assert result["status"] == "completed"
     with storage.open_db(root) as connection:
-        event_types = [row["event_type"] for row in storage.list_agent_events(connection, result["session_id"])]
-    assert event_types == ["question", "decision", "tool_result", "decision"]
+        event_types = [
+            row["event_type"] for row in storage.list_agent_events(connection, result["session_id"])
+        ]
+    assert event_types == ["question", "attempt_started", "decision", "tool_result", "decision"]
+    trace = observability.read_agent_trace(root, str(result["session_id"]))["traces"][0]
+    assert [span["name"] for span in trace["spans"]] == [
+        "skills.selected",
+        "agent.iteration.1",
+        "agent.decision",
+        "tool.read_source",
+        "agent.iteration.2",
+        "agent.decision",
+    ]
 
 
-def test_memo_save_is_explicit_and_versioned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_memo_save_is_explicit_and_versioned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = make_root(tmp_path)
     draft_run(root)
     source_id = copy_synthetic_packet()["sources"][0]["id"]
@@ -223,3 +238,43 @@ def test_cli_interactive_commands_use_json_contract(
     assert main(["--root", str(root), "ask-status", session_id]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["data"]["status"] == "completed"
+
+    assert main(["--root", str(root), "agent-trace", session_id]) == 0
+    trace = json.loads(capsys.readouterr().out)
+    assert trace["data"]["session_id"] == session_id
+    assert trace["data"]["traces"][0]["name"] == "agent.ask"
+    assert [item["name"] for item in trace["data"]["traces"][0]["spans"]] == [
+        "skills.selected",
+        "agent.iteration.1",
+        "agent.decision",
+    ]
+
+
+def test_memo_projection_failure_does_not_leave_saved_memo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_root(tmp_path)
+    draft_run(root)
+    source_id = copy_synthetic_packet()["sources"][0]["id"]
+    monkeypatch.setattr(
+        agent, "_api_call_for_root", lambda root, messages, model: (final_payload(source_id), 10)
+    )
+    result = agent.ask(root, "SYNTHETIC", InteractiveQuestion(question="保存观察"))
+    request = MemoRequest(
+        title="下次核对",
+        content="需要补充同行证据。",
+        source_refs=[
+            EvidenceRef(source_id=source_id, locator="第 1 页，教学段落", relation="supports")
+        ],
+    )
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("injected memo projection failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "upsert_memory_entry", fail)
+        with pytest.raises(sqlite3.OperationalError):
+            agent.memo_save(root, result["session_id"], request)
+    assert agent.memo_list(root, "SYNTHETIC")["memos"] == []
+    saved = agent.memo_save(root, result["session_id"], request)
+    assert saved["memo"]["version"] == 1

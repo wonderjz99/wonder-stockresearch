@@ -1,14 +1,24 @@
 # 技术规格 v1
 
+2026-10-09 更新：用户已批准 Python 领域核心 + 项目自带 Pi SDK 问答运行时。Pi 路径已实现并在验收，默认切换须待质量门槛通过；安装、职责和已知限制见 [Pi 运行时](30-pi-agent-runtime.md)。本更新覆盖下文历史阶段中的“暂不引入 Pi runtime”限制。
+
 本文件给出本版本实施默认值，供新会话直接实现。边界来源于 PLAN；字段、CLI 名称、超时等为工程默认值，可因实际接口验证做不改变产品语义的小幅修正并记录。阶段 7 的直接 DeepSeek 写作边界见第 8 节，阶段 8–10 的独立交互 Agent 边界见第 10 节，LangGraph 编排演进边界见第 9 节。
+
+2026-10-09 可靠性修复覆盖下文旧预算默认：新 `InteractiveQuestion` 默认 `max_iterations=10`、`token_budget=60000`（允许 256–60000）；历史 Turn 的 budget_json 和显式较小输入不改。Pi 专用 `input_token_limit=16000`（1024–16000）、`output_token_limit=4096`（64–8192）与累计预算一起固化在新 Turn，重试不刷新。旧 Turn 缺少新字段时沿用原 Pi 8000/4096；旧 Python loop 的单轮输入/输出策略不变。新配置不涉及 Writer/Router，thinking 仍关闭。工具 registry v6 增加公司查询筛选与分页；紧凑 ref_id 只在 Pi 模型协议内使用，展开后继续原 Pydantic/来源范围/回执校验，对外报告仍为 EvidenceRef。详见 [可靠性说明](32-pi-agent-reliability.md)。
 
 ## 1. 模块与依赖
 
 包 wonder_stockresearch，入口 wonder-research = wonder_stockresearch.cli:main，兼容 python -m wonder_stockresearch。
 
-按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、source_policy.py（来源等级/核对）、market.py（富途行情）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（交互 Agent、记忆与 Memo）、analysis_workspace.py（受限临时计算）、capabilities.py（受控 capability 定义）、skill_registry.py（项目 Skill Catalog 与按需加载）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
+按职责逐阶段建立：models.py（契约）、research.py（服务/校验）、reports.py（纯渲染）、storage.py（SQLite/文件）、sources.py（获取提取）、source_policy.py（来源等级/核对）、market.py（富途行情）、futu_fundamentals.py（富途基本面变量）、disclosures.py（公告）、writer.py（阶段 7 DeepSeek 写作）、agent.py（交互 Agent 会话入口与有限循环）、agent_policy.py（不可变策略与动态 system prompt）、agent_tools.py（Tool handler）、agent_memory.py（Scratchpad/压缩/可信记忆）、agent_errors.py（受控错误）、analysis_workspace.py（受限临时计算）、capabilities.py（受控 capability 定义）、tool_registry.py（Agent 工具 schema、capability 与 handler）、skill_registry.py（项目 Skill Catalog 与按需加载）、router.py（自然语言 RoutePlan）、chat.py（自然语言会话和确认）、progress.py（进度事件）、envfile.py（加载项目根 .env）、cli.py/__main__.py。不先生成空模块或多层接口。
 
 Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 为标准库。开发用 pytest、ruff；HTTP 用 requests，文字 PDF 用 pypdf。富途 SDK 阶段 4 锁定 `futu-api==10.11.7108`（实测可连接本机 OpenD 并返回快照/财务）。uv.lock 随实现维护。不在文档里承诺未经验证的 SDK 版本。
+
+2026-10-10 执行架构整理覆盖上文 Agent 分工：`agent.py` 保留公开入口，`agent_session.py` 管生命周期/事务，`agent_execution.py` 管共用预算/工具/答案接收；旧 JSON 循环在 `legacy_agent.py`，Pi 适配在 `pi_agent.py` / `pi_attempt.py`。`tool_contracts.py` 定义参数，Registry 直接绑定 handler，`agent_results.py` 管内部结果与模型投影。`model_request.py` 提供公共 Python 模型传输，Router/问答不依赖 Writer 私有请求。
+
+新 Turn 保存运行时，恢复以快照选择，未知版本在 Attempt 前拒绝；legacy/Pi 共用请求前持久化预留、严格非负整数 usage 结算与最终事务。`pi_protocol.py` / `pi_bridge.py` 管 JSONL v1：先握手，校验请求/回复和有序 ID；原生工具前后钩子、等待型 subscribe 和 transformContext 调用 Python 规则。致命业务异常终止 bridge/Node，不依赖钩子抛错停机。内部 ToolOutcome 不改变对外报告 JSON。默认运行时与上下文选择策略、真实额度不变，详见 [实际实现与验证](35-agent-execution-architecture.md)。
+
+同轮用户追加确认并实施分包：`fixed` 管固定研究，`interactive` 管共用问答规则与工具，`interactive.pi` 管 Python/Pi 适配；公开 agent/CLI、models/storage、数据源、公司库与模型传输仍在根包。`financial_calculations.py` 管共用财务输入和原确定性公式，无固定/交互反向依赖。`pi_runtime/src/runner.ts` 使用 SDK 类型与 strict 检查，构建为相邻 `runner.mjs`；开发依赖锁在 npm lock，运行时使用已构建 JS 与生产依赖，不要求编译器。源码/生成文件一致性由 `npm run check:generated` 检查，命令与 wheel 均沿用同一运行文件。
 
 项目根通过 --root 显式传入，否则用当前目录，要求根目录存在本项目 pyproject.toml 标识；不要从任意 cwd 悄悄写旧项目。import 无网络/建表副作用。
 
@@ -24,7 +34,7 @@ Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 
 - Gap：missing、where_to_find、next_check、impact。
 - Answer：question_id、status（answered/partial/missing）、statements[]、gap?。`answered` 的 gap 必须为 null；`partial`/`missing` 必须有完整 gap。该状态语义由 writer 缓存复用和 `validate` 双重检查。
 - Gate：gate_id、result（pass/fail/insufficient）、rationale（Statement）、gap?。
-- Moat：dimension_id、score（int 0..10 或 null）、confidence（low/medium/high）、rationale（Statement）、gap?。
+- Moat：dimension_id、score（int 0..10 或 null）、confidence（low/medium/high）、rationale（Statement）、gap?。`score=null` 保留“尚未评估”的原始语义；派生状态另给 `provisional_score_total`，不会回写或伪造单项评分。
 - Challenge：counterargument（Statement）、channels_checked[]、search_scope、refutation_found、overturning_evidence、next_check。
 - Conflict：description、source_ids[]、critical（bool）、resolved（bool）、resolution?。
 - ResearchDraft：schema_version=1、ticker、as_of、answers[]、gates[]、moats[]、challenge、conflicts[]、conclusion（Statement）、review_explanations[]。
@@ -36,6 +46,12 @@ Python >=3.11；Pydantic >=2,<3。sqlite3/argparse/json/hashlib/decimal/pathlib 
 缺口允许完成，但不允许借缺口继续给未经证据支持的结论。score_total 和 quality_status 由程序派生，不接受模型输入。Draft 中不接受 valuation/target_price/action 字段。
 
 ## 3. SQLite 与文件
+
+2026-10-08 公司数据层 A 已实现：独立 `data/company.db`（schema v1，所有公司共用）保存 source_batches、company_profile_facts、financial_facts；`wonder.db` 仍管理来源身份、研究与 Agent 状态，原始归档不迁移。公司服务只读主库，验证当前 ticker 目录、Source 身份及原始字节哈希，按来源/哈希/解析器版本幂等导入；失败批次不作为事实返回，未知数值/历史采集失败保留 partial 诊断。整批事务防半份事实，完整重建经临时库成功后才替换公司库。数值保留 Decimal 文本，来源未提供的期间/单位/披露元数据不推断。支持 profile、statements、operational_efficiency、revenue_breakdown。详见 [实际实现](28-company-data-store.md) 与 [后续计划](27-company-database-plan.md)。B 已接入显式 company_latest；旧范围的 QueryWorkspace 语义不变，详见 [共享查询实现](29-company-agent-query.md)。
+
+公司数据层 B：新 chat 临时问题采用 company_latest，直接 ask 默认 latest_completed_report 不变。Turn.question_json 内保存受 Pydantic 校验的来源/解析器版本快照，重试不重选，追问继承 allow_network 并创建新范围。每类 Futu 数据选择最新获取来源，新 Turn 可复用他轮补取；原 run 范围不扩权。补取先归档/登记，再按所选 source_id 增量索引；未知、失败、partial 分开返回。query_company_data 默认返回字段与期间目录，facts 附查询导航；目录不能引用。公司 SQL 快照 v2 含基本字段、财务字段/期间类型/单位/会计口径/业务维度及来源/解析版本，旧范围仍用 v1。最终报告和 Memo 要求当前 Turn 实际回执及未变来源。单次输入目标从固定 5,000 改为基于规则/最新结果动态调整，最高 8,000；Turn 默认 30,000 总预算与六次决策不变，实际 usage 结算，既有预算不刷新。来源授权/数值计算可检查，但没有实现自然语言结论的确定性语义证明，真实答案单位臆断仍列为质量缺口。
+
+CLI：`company-data sync [TICKER]`、`rebuild`、`status [TICKER]`、`fields TICKER`、`read TICKER`。人工查询支持 `--dataset/--field/--period/--source-id/--limit/--offset`，每表最多 200 行，参数绑定；选择语义为 all_indexed_sources，未去重为最新或历史时点事实。status 返回分组覆盖与有界异常诊断；无公司库时不自动建库。同步有 failed 时输出部分成功结果和非零退出码；partial 在结果/覆盖诊断中明确标识。
 
 四张初始表：
 
@@ -66,7 +82,7 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 
 共同选项：--root PATH。JSON stdout 为 {ok, data, issues}；issues 总为数组。正常/仅警告 exit 0，校验拒绝 exit 2，I/O或provider错误 exit 1；日志到 stderr，不打印秘密。JSON 输入 --input PATH，PATH=- 表示 stdin。
 
-输出按 stdout 是否为 TTY 区分：交互终端中的 `finish` 以人类可读摘要展示完成状态、质量、护城河总分、run 目录及 `company.md`、`research.json` 绝对路径；存在 `review.md` 时也列出。`chat` 完成正式研究时复用该摘要，不显示原始 JSON 或重复 session_id。stdout 被管道或重定向时，`finish` 保持 `{ok,data,issues}` JSON 契约。进度事件始终写 stderr。摘要遇到幂等 finish 返回值缺少质量/分数时，通过只读 `status` 查询补齐。
+输出按 stdout 是否为 TTY 区分：交互终端中的 `finish` 以人类可读摘要展示完成状态、质量、严格证据总分与可用暂定总分、run 目录及 `company.md`、`research.json` 绝对路径；存在 `review.md` 时也列出。`chat` 完成正式研究时复用该摘要，不显示原始 JSON 或重复 session_id。stdout 被管道或重定向时，`finish` 保持 `{ok,data,issues}` JSON 契约。进度事件始终写 stderr。摘要遇到幂等 finish 返回值缺少质量/分数时，通过只读 `status` 查询补齐。
 
 `company.md` 的展示规则：Q01–Q24 标题包含 `docs/research-spec.md` 的完整问题文本；答案状态、陈述类别、证据关系等面向读者的枚举转换为中文。数值使用千位分隔，保持 Decimal 原精度，不舍入或转换币种；相同的单位和币种只展示一次。引用按 source_id 的确定顺序使用短编号，文末索引映射回完整 source_id 和来源元数据。相同陈述内三元组（source_id、locator、relation）相同的引用只显示一次；数值引用若与所属陈述引用完全相同则不重复显示，不同 locator/关系仍保留。以上只改变 Markdown 呈现，不改变 ResearchDraft、校验、数据库或正式报告冻结规则；已完成报告不重写。
 
@@ -82,6 +98,7 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 - skill-list / skill-check [NAME]：只读输出项目 Skill Catalog，或检查指定/全部 Skill 的 manifest、依赖、目录内 resources 和 Capability Registry 绑定；发现诊断返回 exit 2。
 - status RUN_ID / history TICKER：返回状态、质量信息、来源摘要/历史元数据，不一次吐所有原文。
 - draft-read RUN_ID / review-read RUN_ID：分别只读输出当前草稿和最新结构化审查 JSON；不调用模型、不生成报告、不改变 run。draft-preview RUN_ID：在 `data/tmp/draft-previews/<RUN_ID>/` 写入未定稿 Markdown 预览及已有的结构化审查预览，不改变 run。
+- trace-read RUN_ID：只读输出该 run 的 Writer/Reviewer 本地调用树；没有模型调用时返回空 trace，不补造历史记录。
 - save-draft RUN_ID --input packet.json：packet={draft: ResearchDraft, sources: Source[]}，沿用阶段 1 形状。保存已通过类型与身份校验的草稿，并把 packet 内来源登记到 sources/run_sources。阶段 5 起校验会把 packet 内来源与该 run 已挂来源合并（`_effective_sources`），因此 CLI/API 调用方引用 collect/source-add 已归档的来源时 `sources` 可留空，不会误报 `unknown_source`；真正未归档的引用仍被拒绝。允许研究内容缺失，返回业务校验 issues 但不阻止保存。
 - validate RUN_ID：检查结构、答案状态语义、归档文件、时间、来源关联、schema v6 standard run 的当前语义审查，以及 schema v8 富途/官方未解决数值冲突；不写 completed。
 - finish RUN_ID：校验后由服务渲染 company.md 和 research.json；schema v6 同时冻结 quality-review.json；有 baseline 时再渲染 review.md，全部产物哈希一并记录。旧 run 的产物不改写。
@@ -98,13 +115,14 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 
 - compare RUN_ID：要求 baseline；Python 计算问题状态、门闸结果、护城河分数与总分的结构差异，并区分本次新增来源与沿用基准来源。未完成草稿可以预览；正式 review.md 随 finish 固化。任一侧分值为 null 时差值输出 null（不适用）；schema 或口径不同时 `comparable=false`，不算分差。
 - backup --output PATH：目标限项目 data/backups/ 下的新目录，不覆盖已有备份。在项目写锁内用 SQLite backup API 生成 `wonder.db`，复制已归档来源与 completed run 产物到 `files/<相对路径>`，写 `manifest.json`（含每个文件与数据库的 SHA-256、missing 列表）和 `RESTORE.md`。锁被占用时报 `lock_timeout`（exit 1），业务写入不被静默并发。
+  公司数据层 A 起，若 company.db 存在，同一写锁内另生成 company.db 快照，manifest/返回值增加可选 company_database（路径、哈希、schema/解析器版本）；恢复说明同时覆盖两库。无公司库时该项为 null，保持旧项目兼容。B 起按主库备份中的 analysis 状态复制 SQL 快照/查询/结果及已完成函数的代码/结果，旧 JSON 分析产物也收录；missing 和 incomplete_analyses 明示遗漏/未完成状态，路径越界、哈希变化报错。
 
 阶段 7/16（已实现）：
 
-- `write-draft RUN_ID --strategy staged|one-shot --provider deepseek [--model MODEL]`：默认 staged，分六组写 Answers，再生成综合判断并执行 DraftReview；输入哈希相同的成功分组直接复用。一次尝试总调用硬上限 14，最多修订 5 个单元且每单元一次，最终审查仍失败则保持 draft。one-shot 仅用于回归，但不能绕过新 run 的审查门闸。
+- `write-draft RUN_ID --strategy staged|one-shot --provider deepseek [--model MODEL]`：默认 staged，分六组写 Answers，再生成综合判断并执行 DraftReview；输入哈希相同的成功分组直接复用。分组 Prompt、JSON Schema、解析、缓存和修订统一使用顶层 `AnswerSection={answers:[...]}`；损坏外层 JSON 不扫描内部 Statement/Gap 冒充 Answer。一次尝试总调用硬上限 15，语义审查 error 与可映射到草稿单元的 Python 硬校验 error 合并后，最多修订 5 个单元且每单元一次，最终审查或校验仍失败则保持 draft。one-shot 仅用于回归，但不能绕过新 run 的审查门闸。
 - `review-draft RUN_ID [--provider deepseek | --input review.json]`：重复模型审查或导入人工审查；两者都必须通过 hash、覆盖和引用边界校验。
 - Writer prompt 由 `questions.py` 提供 Q01–Q24 完整问题文本，与正式报告标题共用，当前模板版本为 `deepseek-draft-v3`。Q03 要求资本开支、收入比例、期间和口径证据，不接受利润率、ROE、净利润或 EPS 替代；Q04 要求技术替代/产品变化速度及竞争影响，不接受 EPS、利润率或估值指标替代。提示要求证据不足时降级，但模型提示本身不是语义证明；程序 `validate` 仍只校验结构、引用关系、来源资格和时间边界，不能保证自然语言语义正确。
-- 固定研究的 `chat` 若 `validate` 失败，返回 `status=validation_failed`、`run_id` 和逐项 `issues`，run 保持 draft 且不生成正式产物。交互 TTY 显示错误位置/代码/说明；非 TTY 返回 `ok=false` JSON 并以 exit 2 结束。程序不会把 context 引用自动升级为 supports，也不会自动 finish。
+- 固定研究的 `chat` 若 collect/Writer/存储失败，返回 `status=failed`、`run_id`、`failed_step` 和逐项 `issues`，并保存 `resume_fixed_research`；同一 session 输入“重试”复用原 run、来源和成功分组，不重复 collect。`validate` 失败返回 `status=validation_failed`。两类失败都不生成正式产物，交互 TTY 显示错误位置/代码/说明；非 TTY 返回 `ok=false` JSON 并以 exit 2 结束。程序不会把 context 引用自动升级为 supports，也不会自动 finish。finish 写入或校验失败同样保留 session 与原 draft，允许修正后重试。
 - write-draft、ask 和 ask-followup 支持 `--quiet`；默认只输出简短 stderr 进度。
 
 所有命令在模型传值前有 --help，输入错误给出字段路径和修正说明。工具能力只允许文档中列出的操作，不提供任意 Python/SQL 执行命令。
@@ -129,9 +147,9 @@ run 目录名由 created_at 的 UTC 秒级时间与完整 run_id 生成且固定
 
 `skill_registry.py` 先扫描项目根 `skills/*/SKILL.md` 和可选 `skill.json`，生成含 name、description、path、kind、version、applies_to、availability 与 content hash 的 Catalog。Router 只接收这份摘要，不能接收正文或 reference。`RoutePlan` 另有默认空数组的 `skill_names` 字段；旧 Router 输出继续兼容。
 
-无 `skill.json` 的目录是纯方法 Skill。能力 Skill 必须在 manifest 声明 `kind=capability`、至少一个 capabilities，并只引用 `capabilities.py` 中已经注册且可用的能力。所有 prompt_resources 必须位于 Skill 目录内。实际执行才用 `load_for_capability()` 读取正文和 reference；重名、缺 description、路径越界、依赖循环、未知/不可用 capability、重复选择或能力不匹配都拒绝。
+无 `skill.json` 的目录是纯方法 Skill。能力 Skill 必须在 manifest 声明 `kind=capability`、至少一个 capabilities，并只引用 `capabilities.py` 中已经注册且可用的能力。可选 `tools` 只能引用 `tool_registry.py` 中有 Pydantic 参数 schema、适用 capability 和已绑定 Python handler 的稳定工具 ID；纯方法 Skill 不能声明工具。所有 prompt_resources 必须位于 Skill 目录内。实际执行才用 `load_for_capability()` 读取正文和 reference；重名、缺 description、路径越界、依赖循环、未知/不可用 capability、重复选择、未注册/未授权工具或能力不匹配都拒绝。
 
-固定研究把实际加载的摘要写进 `run_steps.skill_selection`，随后 Writer 按摘要重新加载内容并纳入输入哈希；交互 Agent 只把摘要写入 session event，续问会重新加载并核对哈希。审计不保存 Skill 正文、reference、提示全文或隐藏推理。详见 `docs/14-skill-on-demand.md`。
+固定研究把实际加载的摘要写进 `run_steps.skill_selection`，随后 Writer 按摘要重新加载内容并纳入输入哈希；交互 Agent 在 `chat` 执行边界合并 capability 基础工具与所选 Skill grants，只把获准工具 schema 放入 Agent prompt，并在 handler 调用前用同一 allowlist 校验。session event 记录 Skill 摘要、授权工具 ID 和 registry version；续问重新加载并核对哈希与权限。直接 `ask` 为既有调用兼容保留原工具集。审计不保存 Skill 正文、reference、提示全文或隐藏推理。Fixed Research Writer 不使用该动态工具路由。详见 `docs/14-skill-on-demand.md` 与 `docs/17-skill-driven-tool-routing.md`。
 
 `router.py` 调用一次 DeepSeek 并返回严格的 `RoutePlan`。支持 `fixed_research`、`interactive_question`、`memo_save`、`session_followup`、`status_query`、`clarify` 和 `unsupported`。Router 不直接执行数据库、网络或文件操作。
 
@@ -199,6 +217,8 @@ provider 来源应另外保存 observed_at 或原始披露的时间依据：retr
 
 ## 8. 阶段 7：直接调用 DeepSeek 写报告（已实现）
 
+数值审查补充（2026-10-07）：模型审查之后由 Python 核对可识别的完整 ROE 阈值计数、归档 ROE 精度和已标明公式的债务权益比四舍五入。只在数值、期间、字段与来源定位可核对时降级明确误报；浮点导入误差容差为绝对值 `1e-8`，不容忍实质数值改动。`review-draft --recheck` 可离线重检既有同 hash 模型审查并追加记录，模板标注 `+offline-numeric-v1`，不会伪称新 API 调用、覆盖旧审查、改草稿或执行 finish。人工及过期审查拒绝复用；其他语义 error 继续阻塞。
+
 用户已确认本版本在阶段 6 后接入 DeepSeek API。实现保持研究模型、证据、存储、校验和渲染独立于宿主，只新增一个小型 `writer.py`，不引入 SDK 依赖或 provider 注册框架。
 
 writer 从现有 run 的已归档来源与带 source_id/locator 的原文片段（分段截取，总长受控）构造上下文，模型返回 ResearchDraft，再调用现有 save-draft/validate 保存与验证。写作与数据采集分开；仅给已有材料写作不需要完整 Agent 循环。若将来需模型自己搜索和调用工具，再单独设计该执行过程。真实 API smoke 尚未运行（本环境无 `DEEPSEEK_API_KEY`）。
@@ -260,27 +280,64 @@ schema v4 增加：
 
 同一 ticker 和 title 的 Memo 再次保存时递增 `version`，不覆盖旧记录。
 
+schema v10 增加 `agent_turns` 与 `agent_evidence_receipts`，并为 `analysis_runs` 增加可空的 `turn_id`、`sql_hash`。`AgentTurn` 固化每次 `ask`/`ask-followup` 的问题、ticker/run、Skill/allowlist、provider/model 和预算快照；它不是 19D 的 Attempt。v9→v10 迁移会给历史 session 写入 `legacy-<session_id>` Turn，并把既有分析记录关联过去，不改写事件、报告、Memo 或正式研究。
+
 ### 10.3 CLI 契约
 
 ```text
 ask TICKER --input InteractiveQuestion.json [--model MODEL]
 ask-followup SESSION_ID --input InteractiveFollowup.json
 ask-status SESSION_ID
+agent-trace SESSION_ID
 memo-save SESSION_ID --input MemoRequest.json
 memo-list TICKER
 memo-read MEMO_ID
 ```
 
-`ask`、`ask-followup` 和 `ask-status` 只读或写 Agent 会话结果；`memo-save` 是唯一把交互结果保存为公司长期 Memo 的入口。当前版本不提供 agent-promote，也不把临时结果自动转换成 `ResearchDraft`。`InteractiveQuestion.focus` 支持 `general`、`challenge`、`macro`、`peer`、`capacity_cycle` 和 `inventory_cycle`，角色共享同一工具边界。
+`ask`、`ask-followup` 和 `ask-status` 只读或写 Agent 会话结果；`agent-trace` 只读输出由 session 关联的模型与工具 span；`memo-save` 是唯一把交互结果保存为公司长期 Memo 的入口。当前版本不提供 agent-promote，也不把临时结果自动转换成 `ResearchDraft`。`InteractiveQuestion.focus` 支持 `general`、`challenge`、`macro`、`peer`、`capacity_cycle` 和 `inventory_cycle`，角色共享同一工具边界。
 
-### 10.4 Agent 工具和模型协议
+### 10.4 运行时 trace
+
+schema v9 增加 `traces` 和 `trace_spans`。前者关联可选的 `run_id` 或 `session_id`，后者以
+parent span 形成调用树；状态为 `running`、`succeeded` 或 `failed`。`trace-read RUN_ID` 和
+`agent-trace SESSION_ID` 只读输出已保存的树。trace 默认只存模型/调用种类、token、长度、哈希、
+工具名、耗时和受控错误码；不得保存 prompt、模型完整输出、工具完整结果、隐藏推理、认证头或
+密钥。
+
+设置 `WONDER_TRACE_EXPORTER=otlp` 后，安全属性通过可选 OpenTelemetry OTLP/HTTP exporter 发出；
+没有 optional 依赖或 collector 不可用不改变核心业务结果。仅当用户在执行进程中显式设置
+`WONDER_TRACE_CAPTURE_CONTENT=preview|full` 时，exporter 才向该 OTLP collector 额外发送可见的
+LLM input/output 与 Agent tool input/output；`preview` 默认每段最多 12,000 字符，`full` 不截断。
+上述正文绝不写入 SQLite 或 CLI trace；API key/Authorization 与模型隐藏推理字段始终不采集。
+设置 `WONDER_TRACE_EXPORTER=langfuse` 时，同一 exporter 以 Langfuse OTLP/HTTP 规范发送，凭据只从
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`（或等价的 `WONDER_LANGFUSE_*`）读取；自动配置 Basic
+Auth、`x-langfuse-ingestion-version: 4`、Langfuse observation type、trace name 和 Agent session grouping。
+不得将任一 Langfuse key 持久化、打印或写入本地 trace。
+
+### 10.5 Agent 工具和模型协议
 
 阶段 18 在原有 `get_run_status`、`list_sources`、`read_source`、`search_archived_sources`、`read_report`、`list_memos`、`read_memo` 上新增 `query_archived_financials`、`run_trusted_calculation`、`create_analysis_dataset`、`run_analysis_code`、`read_analysis_result`。工具参数使用 Pydantic，工具结果有字符上限，循环有最大迭代次数和 token 预算。模型通过 JSON 决策协议选择 `tool_call`、`final` 或 `ask_user`；DeepSeek 由 Python 直接调用，不需要 OpenCode、MCP 或 LangGraph。
 
-`allow_network=true` 当前明确拒绝，并提示先使用固定 `collect`/`source-add`。临时代码先用可信固定计算；确有不足时只处理 `data/tmp/analysis/<session>/<execution>/input.json` 的最小副本，AST 禁止 import、属性访问、动态执行、shell、网络和任意文件访问。子进程清空环境变量，限制十秒、256 MB、64 KB 输出和每 session 三次执行，审计数据集/代码哈希、来源和结果摘要。未来若增加受控联网工具，必须单独定义权限、来源归档和 `as_of` 规则。
+2026-10-08 按用户最新指令新增 `fetch_financial_data`：缺少原始数值时补取当前公司的富途只读财务资料（statements、operational_efficiency、revenue_breakdown）。新问题默认 `allow_network=true`，显式 false 在打开连接前拒绝；不提供任意 API、网络、账户或交易权限。补取来源独立归档到 `data/stocks/<ticker>/agent-sources/<session>/<turn>/`，不写 `run_sources`；引用范围限当前 Turn，显式 Memo 可保存来源。新 SQL 包含补取资料，旧快照不变。默认总 token 预算为 30,000，历史 Turn 不调整；请求容量与累计消耗分别处理。固定计算器是快捷路径，其他指标由模型选择 SQL/受限函数。函数支持同步推导式、循环和 +=，继续禁止 import、属性访问、动态执行、shell、网络与任意文件访问；保留十秒、256 MB、64 KB 限制。旧数据集工具保留兼容。设计、真实验证和限制见[通用财务问答](25-agent-context-and-financial-tools.md)。
 
-### 10.5 独立运行要求
+阶段 19C 已为新版 `analysis-workspace` Skill 实现 QueryWorkspace：对当前 session/turn/ticker/run 导出的结构化财务事实 SQLite 快照只接受单条只读 `SELECT` 或 `WITH … SELECT`，再将结果交给受限 `def analyze(rows)` 函数。快照、SQL、函数和完整结果保存在 `data/tmp/analysis/<session>/<turn>/<analysis>/`；主数据库永不接受 Agent SQL。SQL 在独立的受限子进程中通过 `immutable` 只读连接、SQLite authorizer、`query_only`、progress handler 和 10 秒/256 MB/64 KB 限制执行，拒绝写操作、DDL、PRAGMA、ATTACH/DETACH、事务、多语句和扩展加载。最终交互报告的引用必须匹配同一 Turn、同一来源哈希的实际工具证据回执。详情见 [docs/21-query-workspace.md](21-query-workspace.md)。旧 JSON 数据集工具仍只服务兼容入口。
+
+### 10.6 独立运行要求
 
 用户只提供 `DEEPSEEK_API_KEY`、可选的 `WONDER_DEEPSEEK_MODEL`，以及已归档资料或富途/OpenD 配置，就可以直接运行项目内 Agent CLI。无需 OpenCode 或其他外部宿主；SQLite、`data/`、session、Scratchpad、Memory 和 Memo 是独立运行后的事实来源。`memory-search TICKER [--query TEXT]` 与 `memory-read MEMORY_ID` 是只读检查入口。
 
 实现交互 Agent 时，参考用户指定的 [Dexter](https://github.com/virattt/dexter) 的 Agent loop、tool registry、skills registry 和 scratchpad，但不复制其 Bun/TypeScript 技术栈，也不复制开放网络、股票筛选、估值/目标价或交易行为。
+
+
+### 19D.1 执行与恢复契约（2026-10-07）
+
+schema v11 增加 AgentAttempt、event/trace 的 Turn/Attempt 标识、按 Turn 不可变临时报告以及 Memo 来源 Turn；v12 显式回填无 Attempt 的 legacy Turn 状态/预算和旧 event/trace 的 Turn 关联。历史报告正文、ResearchRun 和冻结产物不改写。当前代码版本为 v12；本阶段只迁移副本，主库仍为 v11。
+
+`ask-followup` 创建新问题 Turn；`ask-respond SESSION_ID TURN_ID --input FILE` 仅向 waiting_user 补充；`ask-retry SESSION_ID TURN_ID` 仅恢复 failed/interrupted。两者都新建 Attempt，保留原目标、授权、用户补充和累计预算。`ask-status` 返回 Turn/Attempt 历史。成功报告不能覆盖。`ask-interrupt SESSION_ID TURN_ID` 仅结算无存活持锁进程的遗留 running Attempt，不自动重放工具。
+
+Attempt 创建、预算进度、最终状态/报告/episode/FTS、Memo/记忆投影分别使用显式短事务。Session 执行锁贯穿循环，项目写锁只保护短写入，网络调用不持有项目写锁。Ctrl+C 和普通执行异常按已持久化进度结算；硬崩溃由显式 interrupt 恢复。每次模型调用先预留剩余 Turn 预算，已知 usage 后按实际消耗更新；未知 usage 保留预留，不能按免费调用重试，此时 used_tokens 是保守占用而非真实账单。API max_tokens 按剩余预算减去保守输入估算限制，不承诺精确费用上限。同 Attempt 重复调用拒绝，后续 Attempt 仅在同 Turn 复用有完整结果或受控分析产物的成功调用。
+
+模型适配层只服务交互 Agent，生产仍使用 DeepSeek。正式 Writer 当前 MAX_MODEL_CALLS=15，规格同步现有实现与回归测试；此次未修改 Writer 调用次数常量。详情和实际验证见 [19D.1 中文讲解](23-agent-runtime-reliability.md)。
+
+
+2026-10-08 修正：Agent 输入估算统一由 `agent_memory.estimate_input_tokens` 执行（ASCII 0.4、非 ASCII 1.0、每消息 32），不把字符数直接当 token；这是启发式、不是精确 tokenizer。压缩同时受字符阈值和剩余 Turn 预算减输出预留触发，保留规则/工具 schema 与完整问题。首轮记忆最多两条、每条 1,200 字符与三个来源索引；来源目录省略 metadata，原数据仍保留。真实累计计数仍采用 usage。见 [首轮预算修复](24-agent-context-budget-fix.md)。

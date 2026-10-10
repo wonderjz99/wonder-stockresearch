@@ -27,14 +27,14 @@ writer.write_draft()
 
 ## 3. 实际文件与入口
 
-- `src/wonder_stockresearch/writer.py`（新）
+- `src/wonder_stockresearch/fixed/writer.py`（新）
   - `write_draft(root, run_id, *, provider="deepseek", model=None)`：唯一入口。
   - `_build_messages`：one-shot 回归路径最多读取 20 条来源；普通来源每条 ≤4000 字符，Provider 每条 ≤120000 字符，总计 ≤300000 字符，片段带 `locator_hint`。阶段 16 的默认 staged 路径改用按问题组有界的 EvidencePack，见 `docs/13-fixed-research-quality.md`。
   - `_request_deepseek`：一次 POST，连接 10s、读取 300s，`response_format={"type":"json_object"}`，`max_tokens` 默认 16000（`WONDER_DEEPSEEK_MAX_TOKENS`）；默认 `thinking=disabled`、`temperature=0.2`（`--thinking`/`--temperature` 或 `WONDER_DEEPSEEK_THINKING`/`WONDER_DEEPSEEK_TEMPERATURE` 覆盖）；4xx/5xx/网络错误转为 `WriterError`，**错误信息不含凭据**。
   - `_parse_draft`/`_validate_draft`：`json.loads` → 覆写 `ticker`/`as_of`/`schema_version` → `ResearchDraft.model_validate`；失败时保留受控的字段路径，供一次 schema 修复请求使用。
   - `_schema_repair_messages`：只允许修复结构类型和必填字段，不允许改变事实、数字、引用或身份字段。
 - `src/wonder_stockresearch/storage.py`：`SCHEMA_VERSION=3`，`_MIGRATIONS` 新增 v2→v3 `ALTER TABLE run_steps ADD COLUMN metadata_json TEXT`；`insert_step`/`finish_step`/`list_steps` 支持 `model`/`metadata_json`。
-- `src/wonder_stockresearch/research.py`：`_begin_step`/`_end_step` 增加 `model`/`metadata` 参数。
+- `src/wonder_stockresearch/fixed/research.py`：`_begin_step`/`_end_step` 增加 `model`/`metadata` 参数。
 - `src/wonder_stockresearch/cli.py`：新增 `write-draft RUN_ID --provider deepseek [--model MODEL]`，捕获 `WriterError`。
 - `tests/test_writer.py`（新，8 个测试）、`tests/test_run_steps.py`（v1→v3、v2→v3 迁移）。
 

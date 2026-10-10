@@ -48,7 +48,7 @@ skills/<name>/SKILL.md
 | --- | --- | --- |
 | `fixed_research` | 可用 | 创建 ResearchRun、只读采集、写草稿；仍要 validate 和用户确认 finish |
 | `interactive_research` | 可用 | 读取已归档资料、创建 Agent session 和临时报告 |
-| `analysis_workspace` | 已注册，尚不可用 | 为阶段 18 预留；当前任何 Skill 声明它都会被禁用 |
+| `analysis_workspace` | 可用 | 从已归档资料导出最小只读数据集，并在受限 Python AST 环境执行临时代码 |
 
 `capabilities.py` 为每一项定义 Pydantic 输入/输出模型、权限说明和审计目标。Skill 不能通过 `SKILL.md` 增加网络、数据库写入、shell 或代码执行权限。
 
@@ -78,6 +78,7 @@ skills/<name>/SKILL.md
 | `company-analysis-method` | 方法 | 无 | 无 |
 | `company-research` | 能力 | `fixed_research` | `company-analysis-method` |
 | `interactive-research-agent` | 能力 | `interactive_research` | `company-analysis-method` |
+| `analysis-workspace` | 能力 | `interactive_research`, `analysis_workspace` | `company-analysis-method` |
 
 因此 Router 对“写正式报告”可以选择 `company-research`，对“问一个开放问题”可以选择 `interactive-research-agent`。依赖会先加载，最终审计顺序为方法 Skill、能力 Skill。
 
@@ -88,6 +89,8 @@ skills/<name>/SKILL.md
 随后执行 `write-draft` 时，Writer 从该审计记录按需重新加载内容，将方法上下文加入其受控 Prompt，并把同一份摘要写入 `write_draft` 元数据和输入哈希。若正文或 reference 已改变，Writer 返回 `skill_changed_since_selection`；应创建新 run，而不是混用两套方法。
 
 `chat` 的交互分析在用户确认后加载 Skill。正文和 reference 只在该次 Agent 执行内进入上下文；Agent event 只保存摘要。`ask-followup` 会用 event 的名称重新加载并核对哈希，发现变化时停止会话并要求重新发起。
+
+阶段 19B 增加可选 manifest 字段 `tools`。开放问题执行会把 capability 的基础只读工具与所选 Skill 声明的注册工具合并，模型只收到该集合的 schema，Python dispatch 使用同一集合做执行前校验。授权工具 ID、Skill 版本/哈希和 registry 版本进入 session event；follow-up 若发现 Skill 或授权变化会停止，不静默扩大权限。`analysis-workspace` v3 当前授权财务归档查询、可信计算、QueryWorkspace schema/SQL/函数/产物读取；旧 JSON 数据集工具只保留在兼容入口。基础 `interactive-research-agent` Skill 不需要修改即可保持原有说明。
 
 ## 6. CLI
 
@@ -106,6 +109,6 @@ wonder-research --root <项目根> start HK.00941 --skill company-research
 
 ## 7. 当前边界与下一步
 
-阶段 17 不提供任意脚本、终端、网络或临时 Python 执行。`analysis_workspace` 只是注册表中的未来名称；阶段 18 才会为开放问题建立只读数据导出、临时目录、时间/内存/输出限制和代码审计。
+开放问题 Agent 已能按问题动态选择工具顺序；阶段 19B 现在把所选 Skill 的 `tools` 声明接入 Python Tool Registry，并向模型只暴露合并后的 allowlist。新增 Skill 可以组合已有函数而不修改 Agent loop；新增函数须先在 Python 注册参数 schema 和 capability，再由 Skill 引用。直接 `ask` 入口为兼容旧用法仍保留现有工具集合；自然语言 `chat` 才按 Router 选中的 Skill 收窄或扩充本次工具集合。
 
-当前没有 LangGraph 迁移任务。阶段 20 才会用同一开放问题基准评估 Python Agent loop、Pi Agent Core 和受限运行时的实际收益。
+这一扩展只用于开放问题 Agent 的动态工具组合。固定研究仍按已验收流程走 EvidencePack、六组 Writer、结构/语义审查和 `finish` 门闸。任何 Skill 都不能通过 Markdown 执行任意代码、shell、网络访问或修改研究规则。具体设计和验收见 [阶段 19B：Skill 驱动的受控工具路由](17-skill-driven-tool-routing.md)。

@@ -10,10 +10,11 @@ import pytest
 from pypdf import PdfWriter
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import research, sources, storage
+from wonder_stockresearch import sources, storage
 from wonder_stockresearch.cli import main
+from wonder_stockresearch.fixed import research
+from wonder_stockresearch.fixed.research import ResearchError, validate_packet
 from wonder_stockresearch.models import ResearchPacket, Source, SourceRequest
-from wonder_stockresearch.research import ResearchError, validate_packet
 from wonder_stockresearch.sources import SourceError
 
 
@@ -251,7 +252,9 @@ class _FakeResponse:
         return None
 
 
-def test_fetch_url_follows_redirect_with_fake_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_url_follows_redirect_with_fake_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Skipping redirect handling or content-type extension mapping must fail here."""
     monkeypatch.setattr(sources, "_is_public_host", lambda host: True)
     seen: list[str] = []

@@ -1,24 +1,377 @@
 # 项目进度
 
+## 2026-10-10：混合架构 B——执行边界、目录分包与 Pi TypeScript 包装（离线完成）
+
+用户要求按计划重构、需要讨论的变更先确认，测试可在架构完成后集中执行。先将执行边界阶段写入 PLAN；用户随后分别明确同意 Python 分包，以及仅将原 `pi_runtime/runner.mjs` 的 SDK 包装源码改为 TypeScript。本轮落实三项，保留此前工作区改动，未提交 Git。
+
+实际文件与变化：
+
+- `agent.py` 保留公开会话/Memo/授权入口；`interactive/agent_session.py` 提供生命周期与事务，`agent_execution.py` 提供共用预算、工具执行与答案接收，`legacy_agent.py` 是旧 JSON 适配器。Pi 不再反向调用入口模块的私有实现；`interactive/pi/pi_agent.py` 准备运行，`PiAttempt` 用显式状态和命名方法适配事件。
+- 新 Turn 固定运行时，respond/retry 读旧 Turn 快照，follow-up 才选择当前配置；未知或损坏标记在开始 Attempt 前拒绝。两条运行时共用预算预留/结算、成功工具恢复、重复/错误处理、回执与最终事务。公共 usage 仅接受非负整数，排除 bool/负数/字符串等；未知用量保留预留，不从不完整字段推算免费用量。
+- `interactive/tool_contracts.py` 定义一份 Pydantic 参数和小型 ToolContext；Registry 直接绑定 18 个普通 handler，取消闭包到大分支的二次分发。授权、参数、Turn 归属在业务读取前检查，handler 按需加载。`agent_results.py` 统一内部 ToolOutcome/ToolFailure 与有界投影，完整结果先用于回执/产物，再交给模型；外部报告 JSON 不改。
+- `interactive/pi/pi_protocol.py` 定义 JSONL v1 的严格配置/事件/回复、握手和递增 ID，bridge 校验并清理进程。Node 使用 beforeToolCall/afterToolCall、等待型 subscribe、transformContext、streamFn 与 followUp；可恢复错误标记 isError，致命 Python 回调直接终止 Node。SDK turn_end/agent_end 不提交项目成功；没有引入 coding-agent/Harness 或通用 bash/write 等工具。
+- `model_request.py` 共用 Python 配置/HTTP/可见响应/trace，Router、公司识别和旧问答不再借用 Writer 私有传输。供应商错误正文不进入业务日志；隐藏推理不当作可见回答。Writer 分组写作、调用上限和缓存继续原规则。
+- 将 28 个内部模块移至 `fixed`、`interactive`、`interactive.pi`，直接更新 import/测试/脚本/文档链接，不为每个旧路径加 shim。`financial_calculations.py` 单独拥有原输入/结果模型、归档/Capex 提取与确定性计算；Writer 和两种问答工作区直接复用，无公式复制、评分变更或数据库反向依赖。公开 CLI/agent、存储、数据源与公司库入口留在根包，业务 data 路径不变。
+- `pi_runtime/src/runner.ts` 使用 SDK 原生 Agent/事件/消息/工具/流类型，新增 strict tsconfig 与构建/生成一致性脚本；生成根目录 `runner.mjs` 供 Python 启动。项目内新增并锁定开发依赖 TypeScript **7.0.2**、Node 类型 **22.20.5**；Pi 运行依赖保持 **0.83.0**，用户运行已构建包不需要编译器。
+
+集中验证与实际结果：
+
+- 架构完成后默认 `./.venv/bin/python -m pytest -q` → **368 passed（6.82 秒）**；`WONDER_AGENT_RUNTIME=pi ./.venv/bin/python -m pytest -q` → **368 passed（11.07 秒）**。相比评审基线新增85项离线用例，覆盖协议、原生钩子/失败停机、冻结运行时、两路径错误语义、非法用量与预留、按需读取、结果投影和公共传输。首轮旧大状态测试因夹具只改 row.run_id 而触发归属检查，已改成真实且归属一致的 Run/Turn；未弱化产品检查。
+- 在 `src/wonder_stockresearch/pi_runtime` 执行 `npm run typecheck`、`npm run build`、`npm run check:generated`，均退出0。`./.venv/bin/ruff check src tests scripts`、`git diff --check` 通过；分包后 CLI 总帮助退出0。AST 核对 fixed 无 interactive 导入，两个工作区不再导入 fixed_quality。
+- `uv build --wheel --out-dir /private/tmp/wonder-architecture-dist` 成功。核验12项关键包文件与源码哈希相同，包含新 Python 子包、共用计算、TS/JS、配置/构建脚本/锁文件，不含 node_modules/build。临时解压 wheel 后独立加载 CLI 帮助和 Pi runtime 路径成功，未误用开发源码路径。
+- 新增中文教学 `docs/35-agent-execution-architecture.md`；同步 README、09/30/33/34、技术规格、出处与 PLAN。10份相关文档的本地链接与代码围栏检查通过；源码链接随文件迁移同步。
+- 全部问答验证为虚构资料、脚本模型或阻断网络的 fetch 替换。本轮真实模型/OpenD调用 **0**，不运行主库迁移/业务会话/正式定稿，不新增40/40真实额度。安装仅为用户确认的 TS 编译开发依赖；源码参考目录不作为运行依赖。
+
+限制与下一步：默认仍为 legacy，Pi 显式预览，thinking 关闭；没有复测原30题，不宣称语义质量改善。两种上下文历史选择仍各自保留，本阶段仅共用工具结果投影；相关性工作记录、计算到最终数字/期间/单位的结构化渲染、查询快照复用/下推仍待后续阶段。原局部导入依赖环没有因搬目录自动消失。此阶段完成后按教学约定暂停。
+
+## 2026-10-09：Pi 事件与钩子复用评审（文档完成）
+
+按用户追问补充 `docs/34-architecture-options.md` 第 15 节，逐项对应现有进度、trace、工具前后处理、上下文、预算、保存、修复和取消。核对锁定的 core 0.83.0 与指定 coding-agent 源码，确认当前已用等待型 `Agent.subscribe`，而 `AgentSession.subscribe` 不等待异步回调；扩展 `pi.on` 的工具事件内部映射到 core 前后钩子。同包 `AgentHarness.on` 可纳入方案 C 评估，不新增事件框架或自动更换会话管理。
+
+实际验证：纯离线 Node SDK 探针六项行为检查通过，覆盖监听等待、工具前后顺序、结果修改、调用阻止及 Pi turn 与业务 Turn 的区别；真实模型请求为 0。只改评审文档与本记录，没有业务代码变更、依赖安装、主库写入或 Git 提交；未重新运行全量回归。方案仍待选择，默认运行时、40/40 真实额度和 30 题质量结论不变。
+
+## 2026-10-09：工具边界、函数简化与 Pi 复用补充评审（文档完成）
+
+按用户追问扩充 `docs/34-architecture-options.md` 第 11–14 节：核对 core 与 coding-agent 的默认工具差异，说明本项目未实例化 bash/write 等通用工具；解释 Pydantic → JSON Schema → Pi AgentTool → Python handler 的实际链路。读取指定目录中 0.83.0 的 `defineTool` 源码，确认它主要保留 TypeScript 参数推导，无需为此引入 coding-agent。指出当前 handler 闭包再回到大分支的冗余，列出直接函数绑定、执行状态整理及可复用 SDK 函数的取舍。方案仍待选择，未重构业务代码或改变授权、默认运行时、预算及研究范围。
+
+实际验证：`./.venv/bin/python -m pytest -q tests/test_tool_registry.py tests/test_pi_runtime.py tests/test_stage19_query_workspace.py` → **22 passed（1.51 秒）**；离线读取实际工具目录，登记 18 项、直接 ask 兼容目录 17 项，不含 bash/write/edit/通用 read/finish/memo-save。保留既有工作区改动，无模型/OpenD 调用、主库迁移、依赖安装或 Git 提交；真实额度不增加。
+
+## 2026-10-09：现有功能架构方案评审（文档完成，待选择）
+
+用户要求参考指定 Pi 学习项目和 Codex，比较当前功能的设计改进。本次新增 `docs/34-architecture-options.md`：核对锁定的 Pi 0.83.0 实际 API、Python/Pi 调用、上下文投影、查询快照、计算到文字及 Router/Writer 耦合；提出局部整理、明确混合架构和进一步使用 AgentHarness 三种选项，推荐明确混合架构。列出各项改法、成本、复用边界和验收条件；仅提供设计选择，未修改业务代码、当前规格、PLAN、运行时默认或研究方法，保留既有工作区改动。
+
+实际验证：`./.venv/bin/python -m pytest -q` → **283 passed（4.89 秒）**；`WONDER_AGENT_RUNTIME=pi ./.venv/bin/python -m pytest -q` → **283 passed（9.33 秒）**。新文档 13 个本地链接均可解析、代码围栏成对，`git diff --check` 通过。只运行离线测试，无真实模型/OpenD 调用、依赖安装、主库迁移、正式定稿或 Git 提交。真实 30 题质量状态和 40/40 已耗尽额度不变。下一步由用户选择方案；本次不自动开始重构。
+
+## 2026-10-09：当前架构中文总览（文档完成）
+
+用户要求新增 Markdown 解释架构变更。本次新增 `docs/33-current-architecture.md`，按当前源码讲解固定研究与开放问答、Python/Node-Pi 分工、JSONL 事件、双库/隔离快照、Skill/Tool 授权、证据回执、Session/Turn/Attempt、预算、记忆和 trace；更新 README 架构图及阅读入口。明确 Pi 仍为显式预览，默认 Python loop 保留，company.db 是可重建事实投影，SQL 不在业务数据库执行。未改变产品或研究规则，保留既有工作区改动。
+
+实际验证：`./.venv/bin/python -m pytest -q` → **283 passed（5.08 秒）**；`WONDER_AGENT_RUNTIME=pi ./.venv/bin/python -m pytest -q` → **283 passed（9.36 秒）**；`./.venv/bin/ruff check src tests scripts` → All checks passed；CLI 总帮助与 company-data 帮助均退出 0。仅运行离线测试和文档核对，没有真实模型/OpenD 调用、依赖安装、主库迁移、业务数据修改、正式定稿或 Git 提交。
+
+文档静态核对：新增章节、README、PROGRESS 共 3 份 Markdown 的 98 个本地链接均可解析、代码围栏成对；通过 AST 核对文中主要 Python 入口实际存在；`git diff --check` 通过。
+
+限制与下一步：沿用原 Pi 真实验收未通过的状态；本次测试不证明真实研究质量改善，不增加 40/40 的已耗尽额度。后续真实复测与默认切换仍需按既有 PLAN 执行，本文完成后暂停。
+
+## 2026-10-09：Pi 问答可靠性离线修复（完成，真实质量待复测）
+
+用户确认按复盘计划修改，暂不用 thinking。先写入 PLAN，再实现本阶段；没有增加真实执行额度、切换默认或删除旧 loop，保留此前工作区改动，没有 Git 提交。
+
+实际文件：新增 `pi_evidence.py`、`tests/test_pi_reliability.py`、`docs/32-pi-agent-reliability.md`；修改 models、agent、agent_tools、agent_company、tool_registry（v6）、agent_memory、pi_context、pi_agent、pi_runtime/runner.mjs、query_workspace 和原生 SDK 测试；同步 PLAN、README、技术规格、09/30/31 说明与本记录。
+
+- 新问题默认 60,000累计tokens／10轮，允许显式收紧；Pi新增 input_token_limit（默认16,000）与 output_token_limit（默认4,096，最多8,192），固化新Turn。旧Turn的retry/respond不改预算，follow-up继承原Session；无新单轮字段的旧Pi Turn仍用原8,000/4,096。Writer/Router不变，thinking仍disabled。旧Python loop仍沿用原单轮策略。
+- get_run_status在handler处直接摘要步骤/草稿。query_company_data增加精确field_keys、多periods、period_kind和offset分页及有限同义词检索。投影按实际可见行重算续页位置；大单项结果返回截断导航，避免无界进入模型上下文。
+- 当前Turn可见调用重建有界工作记录，保留查询参数、事实样本、analysis_id、计算结果及续查状态；压缩按完整原生调用组处理，不修改原可见审计或扩展跨Turn证据权限。
+- 紧凑ref_id由本Turn回执生成，Python展开后仍执行原公司/来源/回执校验；输出报告仍用source_id/locator。引用/结构修复给具体错误和合法引用，一次修复轮不再提供工具，Python也拒绝该轮工具调用，仍计入原预算。
+- 计算产物增加实际输入字段/期间/单位覆盖摘要与函数哈希；SQL/函数错误返回具体纠正提示。没有为30题写死计算或用未知单位推断百分号，没有增加语义审查Agent。
+
+实际验证：
+
+- `WONDER_AGENT_RUNTIME=pi ./.venv/bin/python -m pytest -q` → **283 passed（9.88秒）**；默认路径 `./.venv/bin/python -m pytest -q` → **283 passed（5.04秒）**。新增10个可靠性回归，原真实Pi SDK零网络fetch测试增加2个组合，覆盖工具关闭与thinking不变。
+- `./.venv/bin/ruff check src tests scripts`通过；`git diff --check`通过；`uv build --wheel`成功。单轮输入上限在请求/预留前拒绝，预算继承、跨Turn引用拒绝、引用修复不重查、期间筛选、分页不跳行、计算覆盖和区间关系均有离线验证。
+- 执行36的历史messages仅做离线投影：当前策略/工具定义下输入估算**7,768**，低于当时剩余**10,147**；记录为忽略的`data/audits/20261009-pi/offline-context-recheck.json`。与原20,865估算所用代码/提示不同，不能当作同条件模型性能对照或真实问答通过。
+- 真实账本复核仍为**40/40**，本阶段新增真实模型/OpenD执行**0**。原30题的4通过/5部分/21失败不改写。
+- 原冻结run文件哈希与旧审计快照一致。主库哈希与旧评测快照已不同，其中有2026-10-09 07:39–07:44 UTC的新会话记录；本轮未对主库执行Agent/迁移/恢复命令，也没有本轮开始前的字节快照，因此不使用旧快照宣称本轮主库字节不变，不回退已有会话。
+
+已知限制：必要检索前提前final、错误文字解释、原始数据异常与真实资料缺口仍待真实验收；更高预算只是可用配置，并未证明60,000/10是最优值。工作记录是最近操作的有界摘要，不能保证无限任务记忆。中文教学含数据流、实际入口、配置、测试与练习。下一步需用户另行授权真实额度，先按同一资料快照对照工具修复与预算放宽，再决定完整30题及默认切换。按阶段约定暂停。
+
+## 2026-10-09：Pi SDK 预览实现落地，质量验收未通过
+
+用户完成 Q1–Q8 决策并要求写入计划后开始实施。已将混合架构、开放问答完整生命周期、Python 统一规范化记录、旧未完成问题兼容范围、仅新 Pi 的 30 题与最多 10 次额外真实执行、预算和严格切换标准写入 PLAN，并同步 AGENTS 的运行时边界。保留原有工作区改动，不提交 Git。
+
+实际新增：`pi_runtime/package.json`、`package-lock.json`、`runner.mjs`、`pi_bridge.py`、`pi_agent.py`、`pi_context.py`、`tests/test_pi_runtime.py`、`scripts/eval_pi_agent.py`、`docs/30-pi-agent-runtime.md`、`docs/31-pi-agent-evaluation.md`。修改agent生命周期入口、原生提示词、storage schema 13的规范化消息表，以及对应测试/规格/README。项目内安装锁定的pi-ai/pi-agent-core 0.83.0，没有依赖参考项目、引入pi-coding-agent或提交Git。
+
+- Pi接管原生provider、模型/工具循环和消息事件；Python继续处理授权、公司/来源范围、证据回执、计算、累计预算、Session/Turn/Attempt和报告事务。覆盖ask/followup/respond/retry/chat交互分支，status/interrupt/Memo继续复用Python。旧未完成Turn选择Pi时要求重新ask，拒绝发生在记录新Attempt/用户补充之前。
+- Pi在内存运行，Python保存有序用户原话/可见助手/原生toolCall ID和参数/摘要及产物引用；恢复时只重建完整工具组。隐藏推理、诊断、认证头和完整请求不保存。模型请求前持久化预留，未知usage不产生免费重试；子进程中断会清理进程组。
+- 迁移前基线261 passed（3.50秒）。最终 `WONDER_AGENT_RUNTIME=pi ./.venv/bin/python -m pytest -q` → **271 passed（8.73秒）**；`./.venv/bin/ruff check src tests scripts`通过；`git diff --check`通过。新增测试覆盖真实pi-ai SSE的零网络fetch替换、原生调用ID/用量缺失、推理过滤、半组恢复、消息保存、旧Turn拒绝不改历史、冻结报告攻击、事实优先/长文/大状态投影、既有LLM trace用量。既有权限/等待/重试/预算/事务回归实际经Pi执行。
+- `uv build --wheel`成功；核验wheel包括runtime源码/manifest/锁文件，不含node_modules。依赖安装使用npm锁文件，ignore-scripts；没有另装产品扩展。
+- 只运行新Pi真实验证，共**40/40**：30题覆盖及10次冒烟/网络失败/定向复测。34次completed、6次failed；每题最后一次独立质量为**4通过、5部分、21失败**。不能以completed替代验收。首个请求未返回usage，账本保留30,000预留；全部记录781,602 tokens不等于精确账单。
+- 全部真实请求写隔离副本，原主库和所有run文件逐题哈希检查不变；独立核验20处原始JSON定位及哈希，并用Decimal复算均值、增长率、标准差和区间关系。记录在忽略的 `data/audits/20261009-pi/`；最后一次逐题审阅为review.json，4个CLI trace及可见调用索引为trace-examples.md。
+- 已修正强制JSON响应模式干扰原生调用、facts目录挤占、取得日期投影；40次结束后补了长介绍摘录、大状态计数摘要和原生LLM span/usage，有离线测试，**没有额外真实复测**。历史真实trace不虚构回填LLM span，原iteration/tool/decision树与messages/usage仍可读。
+
+未解决阻塞：未完成必要检索/计算就final、预览省略或SQL失败被当成缺失、单位臆断、期间配错、心算错误、正确计算后的错误解释；限额内的定向复测仍未通过。Q11原始值均值已正确，但不足以代表整个Agent验收。没有运行旧Agent同条件真实对照，不能将失败率归因于Pi SDK。
+
+按用户已确认规则，**不切换默认、不删除旧loop、不自动增加真实额度**。显式 `export WONDER_AGENT_RUNTIME=pi` 可检查预览。此阶段代码、离线验证、中文教学和真实审阅已记录，迁移验收仍未完成。下一步围绕有界事实投影、必要查询/计算完成条件、数字/期间/引用的一致性修复；真实复测需另行授权额度。用户随后询问失败根因与trace，已生成可直接阅读的四例复盘，没有额外模型调用。
+
+## 2026-10-08：公司数据层 B——Agent 共享查询与来源固定（完成，按用户要求暂停）
+
+用户要求继续 A 之后的 B，随后明确“这个阶段完成了先暂停”。当前阶段已收尾，不启动 C 的完整 30 题或 D 的架构/体积优化。
+
+实际文件：新增 `agent_company.py`、`tests/test_company_agent.py`、`docs/29-company-agent-query.md`；修改 models/chat/agent、agent_data/agent_tools、company_data、query_workspace、tool_registry、agent_memory/agent_model、research.backup、analysis-workspace Skill 及对应规格/README/PLAN。保留原有工作区改动，没有提交 Git或安装扩展。
+
+- 新 chat 使用显式 company_latest；直接 ask 的默认旧范围不变。Turn JSON 固定四类资料的 Source 与解析版本，重试不重选，追问选新范围且继承网络权限。新范围可复用他轮补取，旧 run 不扩权，无主库 schema 迁移。
+- 公司字段/期间目录、少量事实和 SQL 快照 v2 已接入；profile、statements、operational_efficiency、revenue_breakdown 补取先归档/登记，再按所选来源索引。原始单位和口径不猜测，失败/partial/missing 分开。真实富途补取未执行，离线假供应商覆盖其路径。
+- 最终报告/Memo 仍验证当前 Turn 回执、ticker 与归档哈希；补取替换查询版本后旧计算输入可追溯。目录不作为引用。公司范围初始上下文优先四类来源和可信长期记忆，不把 provisional 旧答案当原始数据。
+- 真实调试发现固定说明占约 4,169 tokens，原 5,000 单次输入上限使三条输入也被压成一条。现按规则/最新结果动态分配，默认目标 5,000、最高 8,000；总预算仍为新 Turn 默认 30,000，真实 usage 结算，重试不刷新。可见 SQL 引用随可见行对齐；函数处理完整 SQL 行，不依赖聊天预览。
+- backup 收录两库、来源、完成报告和已登记分析的 SQL 快照/查询/函数/结果，按数据库备份状态选择文件；遗漏/未完成状态与复制哈希均记录。虚构资料两库及计算产物恢复通过；完整主项目恢复未运行。
+
+实际验证：
+
+- `./.venv/bin/python -m pytest -q` → **261 passed（3.81 秒）**，比 A 新增 15 个用例；`./.venv/bin/ruff check src tests` → All checks passed；`git diff --check` 无错误。
+- 中国移动真实归档的隔离副本：四类来源各一个，6,388 条财务事实、23 条基本字段；schema + SQL 首次约 0.36 秒。B 验证前后原项目主库 SHA-256 相同，未在原库运行真实 Agent；所有模型会话与计算留在隔离根。
+- 同一原问题在六个开发版本上各跑一次真实模型；前五次 completed 但有误判缺失、反复查询或猜平均等质量失败，已保留诊断，不算通过率。最后一次走目录 → SQL → 模型编写函数 → final，4 次决策、14,252 tokens、5.781 秒。SQL 选中 2025/FY、2024/FY、2023/FY，三值 58.227439、58.436007、59.209519；Decimal 均值 58.6243216667，与函数结果和三处原文定位一致。
+- **该真实答案仍不是完整合格：原归档 unit/scale 缺失，模型输出却用了百分号，并对期间/口径表述留下缺口。** 本阶段证明共享查询、真实计算、来源和预算链路，不证明每句语义正确。不能以 status=completed 或一次正确算术当作研究质量通过。
+- 忽略的 `data/audits/20261008-company-agent/` 保存隔离副本、查询验证、六版模型结果与最终计算核对；无密钥/隐藏推理输出。文档记录实际结果和限制。已继续参考 futuapi Skill，以及用户指定 Dexter/Pi 核心设计；没有引入外部宿主或多 Agent。
+
+下一阶段 C（尚未开始）：按同一快照执行已准备的 30 题，分别评分计算、期间/单位、引用支持、越权边界、预算与失败；优先修复已发现的单位臆断、未计算却宣称均值及重复查询。D 再根据测量处理 FTS、体积和职责简化。当前暂停，等待用户下一次指令。
+
+## 2026-10-08：公司数据层 A——独立公司库、离线解析与回填（完成）
+
+用户确认继续实施公司库计划。本阶段只交付 A，并提前让现有 backup 收录新库；没有切换 Agent 查询、调用模型/OpenD、更新外部公司数据或运行真实 30 题。公司库是归档投影，wonder.db 仍是来源登记、研究与会话的权威存储。
+
+实际文件：新增 `src/wonder_stockresearch/company_parser.py`、`company_data.py`、`tests/test_company_data.py` 和 `docs/28-company-data-store.md`；修改 CLI、research.backup、README、PLAN、技术规格与 26/27 说明。没有提交 Git，保留已有工作区改动。
+
+- schema v1 三表：source_batches、company_profile_facts、financial_facts。确定性解析四类 Futu envelope；原始字段/数值文本、Decimal、期间/会计元数据、分部/关键指标分组与 JSON 定位均保留。未知单位/披露时间不猜；data/yoy/qoq 分开，基础数据不按问答写公式。
+- 来源身份、ticker 路径及哈希校验；主库连接只读、不触发迁移。成功批次按来源/哈希/解析器版本幂等跳过；失败可重试，整批事务防半份事实；新解析器版本保留旧投影。重建用临时库，任一 failed 不替换原库；危险符号链接拒绝。
+- `company-data sync [TICKER]`、`rebuild`、`status [TICKER]`、`fields/read TICKER` 可运行。查询参数经 Pydantic/SQL 绑定、每表最多 200 行；人工结果明确 all_indexed_sources，没有冒充最新/历史时点或 Turn 证据授权。
+- backup 在原写锁内额外生成可选 company.db 快照、manifest 哈希/版本与恢复说明，无公司库的旧项目兼容。虚构资料的两库备份恢复已测；尚未扩展被引用计算产物收录或进行完整主项目恢复。
+
+实际验证：
+
+- `./.venv/bin/python -m pytest -q` → 246 passed（3.26 秒，新增 20 个用例）；`./.venv/bin/ruff check src tests` → All checks passed；`git diff --check` 无错误。
+- 隔离副本与本地真实归档分别完成导入：92 个历史来源，510 条基本字段、98,377 条数值事实；重复运行全部跳过。数值数量包含同比与历史来源版本，不是唯一经济指标数。
+- 隔离数据的 98,377 个数值和 510 个基本字段全部按 locator 回到原始 JSON 核对值。七家公司最新经营效率/营收构成的 14 个来源在新库中均有 14–400 条数值；旧 Agent 临时解析器未改。
+- 本地新公司库 47,652,864 字节（约 45.45 MiB）。一份旧中国电信营收构成归档包含九个历史获取失败，保留 partial；其余 91 批次 completed，无 failed。没有把接口失败当作零或未披露。
+- 回填前后 wonder.db 文件哈希不变。实际 CLI sync 退出 0；`.venv/bin/wonder-research --root . company-data fields HK.00941 --dataset statements --limit 3` 与 `read HK.00941 --dataset profile --field 公司名称 --limit 1` 均退出 0。
+- 忽略的审计目录 `data/audits/20261008-company-db/` 保存来源/主库隔离副本、`isolated-validation.json`、`value-validation.json`、`local-backfill.json`；该副本仅含本阶段四类原文及主库，不是完整项目备份。
+
+教学说明含实际数据流、函数/DDL、命令、事务/Decimal 原因、测试、练习和限制。已使用本地 futuapi Skill 核对字段，未安装新 Skill 或运行接口脚本。
+
+已知限制与下一阶段：字段仍为供应商原始语义，单位/披露时间缺失不能自动补全；重复获取事件会保留重复经济数值。新采集尚需手动 sync。下一阶段 B 才接入显式公司数据范围、字段目录/覆盖、profile 补取与补取后索引、跨 Turn 复用、本 Turn 证据回执，并核验计算产物备份；之后执行 30 题基线。按教学约定，本阶段完成后暂停。
+
+## 2026-10-08：独立公司数据库设计建议（未实施）
+
+用户进一步提出单独保存公司财务等数据。本次将下一阶段建议修订为所有公司共用 `data/company.db`，`wonder.db` 继续保存来源登记、研究与会话。新增 `docs/27-company-database-plan.md`，同步题集说明、PLAN、README 与技术规格，明确这是待实施设计。
+
+- 公司库是原始归档的可重建、版本化投影，首版拟采用解析批次、基本字段、财务事实三类表，确定性解析覆盖四类现有资料；衍生指标仍由模型选择 SQL/受限 Python，不按问题写死。
+- 先归档/登记 Source，再事务提交公司事实批次；来源身份与哈希由程序跨库校验，失败可幂等补索引。显式区分 company_latest、正式 run 与历史时点，旧 Turn/报告不自动换数据。
+- 公司库实施需同步设计两库及引用文件的备份/恢复。只读统计显示主库约 81 MiB，FTS content/data 约 65 MiB；新公司库本身不解决现有全文索引体积。
+- 实施次序：保留现状快照与题集 → A 公司库/解析 → B 共享查询/刷新/联合备份 → C 30 题复测 → D 按测量优化检索与代码组织。每阶段完成后暂停。此轮没有创建数据库、迁移资料或执行真实 30 题。
+
+参考已核对的 SQLite 官方外键、ATTACH 与 Backup API 文档，链接见设计文档。本次仅文档调整；沿用本轮此前实际运行的 226 passed（2.92 秒）代码基线，不宣称公司库功能已通过测试。
+
+## 2026-10-08：公司数据盘点与 30 道交互测试题准备
+
+用户要求确认是否已有按公司保存的基本/财务数据，准备 30 道之后手工测试的问题，并提出下一步计划。本次只读盘点与准备题集，不执行这些真实问答，不实施数据库迁移或新的公司数据层。
+
+- 只读主库与归档：当前 7 个 ticker 均有 profile、statements、经营效率和营收构成；最新四类共 28 个文件存在且哈希匹配。最新单个 statements 解析出 1,232–3,113 条数值、149–191 个不同科目标签；年度范围与逐公司结果见 `docs/26-company-data-and-agent-eval.md`。基本信息原文也有公司名称，但 stocks 的四条 name 仍为空。
+- 明确现状：主库保存来源索引、研究与会话，报表主要为归档 JSON；没有持久 financial_facts 表，SQL 仍按次生成 QueryWorkspace 快照。Agent 默认 run 范围不等于公司全部最新资料，补取缓存限当前 Turn，profile 没有按需补取工具。七家公司经营效率/营收构成原文非空，但这 14 个来源通过当前数值解析器均得到 0 条事实；这是解析覆盖缺口，不是未采集。
+- 新增 `docs/evals/interactive-agent-30.v1.json` 与中文说明 `docs/26-company-data-and-agent-eval.md`：六类各五题，覆盖基本资料、原始财务、基础计算、自定义计算、时间/缺口/离线数据与交互边界。Q29 依赖 Q11 的 session 做 follow-up；Q25 禁止资料补取；Q30 用 ask 测试正式研究写入拒绝。所有题带验收点，不预填数值答案或通过结果。
+- 本机生成 `data/evals/manual-30/inputs/Q01.json` 至 `Q30.json`；30 份输入经当前 Pydantic 模型验证，题号唯一、分类数量与依赖有效。只读盘点在 `data/audits/20261008-company-data/inventory.json`；主库哈希不变。
+- 同步 README 与 PLAN。建议下一步先固定 30 题现状基线，再单独实现共享、可重建的公司字段/财务事实投影及数据范围/刷新契约，随后按同一快照复测计算与引用，再做中文检索、索引瘦身、备份和模块整理。保持原始证据与冻结研究，不引入新数据库产品或运行框架。
+
+实际验证：`./.venv/bin/python -m pytest -q` → 226 passed（2.92 秒）；题集静态/Pydantic 校验通过，真实题集执行数 0。本次无模型/OpenD 调用、无业务代码改动、无数据库迁移、无 Git 提交。题集准备不等于 19E 评测已完成；上述公司数据层仍是下一阶段建议。
+
+## 2026-10-08：按 Pi 核心边界收口通用财务问答
+
+用户再次报告多轮预算失败，要求从本质解决、参考 Pi 核心设计，并明确允许归档缺指标时调用富途只读接口、必要时由模型编写计算代码。本次继续现有可靠性收口，没有进入新产品阶段、安装扩展、提交 Git 或修改正式研究。
+
+- `agent_context.py` 提供类型化执行记录到模型请求的 transform/convert 边界；`agent_memory.py` 对结果作有界 JSON 投影、剥离重复引用/审计信息，按规则与问题占用分配空间，压缩不能静默丢掉最新工具结果。
+- `agent.py` 返回可恢复工具错误、缓存成功调用并限制重复循环；`agent_model.py` 分开单请求输入目标/输出上限与 Turn 总消耗。新问题默认总预算 30,000，既有 Turn 不扩容。实际原请求用量超过旧 12,000，故不能仅靠字符估算修复宣称已解决。
+- `analysis_workspace.py` 支持多检索词任一匹配；`agent_data.py`/`agent_tools.py`/`storage.py` 接通按需富途补取、当前 Turn 来源范围与缓存。来源文件归档在股票目录的 agent-sources 下，不写正式 run_sources；SQL、引用校验和显式 Memo 接受当前 Turn 的真实来源。
+- `query_workspace.py` 自动把本轮补取资料纳入新快照，旧产物不变；SQLite 错误返回可纠正诊断，受限函数支持推导式、普通循环、解包与 +=，保持进程/权限限制。
+- `tool_registry.py` v4、analysis-workspace v4、interactive-research-agent v2：固定公式是快捷路径，其他指标由模型选择 SQL/函数。`allow_network` 新默认 true，但仅允许当前公司财务补取，false 在连接前拒绝。`agent_policy.py` 明确最终引用对象结构；`router.py` 补充合法枚举/字段协议。
+- 新增 `tests/test_agent_data.py`，扩充上下文测试；同步 README、PLAN、技术/Agent 规格、Skill 和出处。中文说明为 `docs/25-agent-context-and-financial-tools.md`。
+
+实际验证：
+
+- `./.venv/bin/python -m pytest -q`：226 passed（2.88 秒）。`./.venv/bin/ruff check src tests`：All checks passed。
+- 真实 DeepSeek + 主库只读备份的隔离副本：原“中国移动最近三年毛利率平均值”请求五轮完成，20,315 tokens。模型生成 SQL 选取 2023–2025/FY 三条 CNY 记录，再自行生成 Python 推导式计算平均值，报告约 58.62%。主库哈希不变。
+- 真实 DeepSeek + OpenD + 无任何归档的临时库：主动补取富途 statements、查询三年营业总收入，六轮完成、19,891 tokens。该次平均值写在最终模型文字中，未执行聚合/函数，故只证明真实补取与查询通路，不能声称计算工具遵循率达标。主库哈希不变。
+- 离线集成另验证完整“缺少自定义指标→模拟补取→SQL→函数→引用→显式 Memo”链路、正式 run 不变、跨 Turn 隔离、缓存、离线拒绝和接口失败恢复。真实摘要/代码审计在忽略的 `data/audits/20261008-multiturn/`，临时库已清理，无密钥或隐藏推理。
+
+限制与下一步：真实尝试中先后出现结果丢失后的循环、计算语法和引用协议失败，不能把两次成功 smoke 当作稳定性基准。最终文字仍可能遗漏期间解释或绕过计算工具；富途沿用现有年度/数量/市场覆盖限制。旧显式授权版本不自动升级，版本不匹配需新建问题。下一步建议优先做 19E 小型跨场景质量/成本基线，检验补取、实际计算执行、期间/重复来源、引用和预算；随后根据证据优化中文检索、共享索引及数据保留/备份。19D.2 和 GitHub Actions 继续暂缓。本轮完成后暂停。
+
+## 2026-10-08：修复 chat 首轮预算误拦截
+
+用户报告“中国移动最近三年毛利率平均值”在第 1 轮即 agent_budget_exhausted。只读检查最近 Agent Session：budget_exhausted、iteration=1、used_tokens=0。重建 system 6,392 字符、上下文约 17,351 字符；19D.1 按字符估 token 的请求前检查与 28,000 字符才压缩的旧阈值不匹配。这是实现回归；Router 已成功修复 JSON 并继续，不是最终失败原因。
+
+- `agent_memory.py` 新增统一轻量输入估算（ASCII 0.4、非 ASCII 1.0、每消息开销 32；不是官方 tokenizer），压缩增加 max_input_tokens，按当前剩余预算减输出预留提前触发。保留完整规则/工具 schema、问题与用户补充；优先省略旧观察，尽可能保留最近完整工具结果；持久化工作记忆/回执不删。
+- `agent.py` 首轮来源目录不带 metadata，记忆最多两条、每条 1,200 字符与三个来源索引，附省略数量；API 前置检查使用同一估算，失败说明剩余预算与输入估算，零调用/零消耗。预算默认值、未知用量预留、超额回答拒绝和正式研究边界不变。
+- 新增 `tests/test_agent_context_budget.py`：真实项目 Skill + 大型历史记忆的 chat→Agent→mock HTTP 回归、剩余预算触发压缩且保留近期尾部数值、真正不足时不调用 HTTP。调整既有输出上限测试为新估算结果。旧 scripted decide 绕过 API 入口，是此前漏测的原因。
+- 中文说明见 `docs/24-agent-context-budget-fix.md`，同步 README 与技术规格。未安装依赖、改 schema、提交 Git 或调用真实模型/OpenD。
+
+实际验证：`./.venv/bin/python -m pytest -q` → 216 passed（2.47 秒）；`./.venv/bin/ruff check src tests` → All checks passed。主库只读备份的临时副本中，以原问题/授权进入 API 前置检查，替换 HTTP 为两轮离线占位响应：首轮 14,221 字符/估算 7,430 tokens，次轮 14,283 字符/估算 7,496 tokens，默认预算内 succeeded；真实网络调用 0、主库文件哈希不变、副本自动清理。摘要在 `data/audits/20261008-context-budget/offline-replay.json`。
+
+限制：副本验证只证明预算路径已修复，不证明真实毛利率计算正确或真实模型一定能在 12,000 总额度内完成。估算不是硬费用上限。原 budget_exhausted Turn 不重开，用户重跑原命令创建新 Turn。中文检索、完整 Turn 工作状态与索引优化仍待后续阶段。
+
+## 2026-10-07：阶段 19D.1 最小运行时与可靠性收口
+
+用户在架构审计后要求继续。本次只完成建议第一项可靠性收口，保留已有 MU 数值审查及其他工作区改动；未提交 Git、安装扩展、执行 CI 或进入下一阶段。
+
+- `storage.py` 增加显式事务/嵌套 SAVEPOINT。`agent.py` 将 Attempt 创建、预算进度、成功状态/报告/episode/FTS、Memo/记忆投影分别原子提交；提交失败不会出现成功状态却没有报告，也不会留下孤立 Memo。
+- 收口现有 `agent_runtime.py`/`agent_model.py`：Turn/Attempt 生命周期、按 Turn 报告历史、respond/retry、scripted client、冻结授权与累计预算；模型调用前持久化预算预留，已知 usage 后结算，未知用量保留预留；超额 final 不接受。API 输出按剩余预算与保守输入估算限制，不能当作精确账单上限。
+- 新增 Session 执行锁与 `ask-interrupt SESSION_ID TURN_ID`；Ctrl+C/普通异常按持久化进度结算，仍有持锁进程时拒绝遗留中断操作。重试恢复用户补充，同 Turn 可复用已成功且完整或具有受控分析产物 ID 的工具结果；普通截断结果不当作完整缓存。
+- schema v12 显式修复 legacy Turn 状态、旧计数与 event/trace 的 Turn 关联；模型允许 Memo 来源 legacy Turn ID。历史报告正文、正式研究与完成产物不重写。
+- 新增/扩充 `tests/test_stage19_runtime.py`、`tests/test_agent.py`；更新 QueryWorkspace 测试版本契约。新增中文讲解 `docs/23-agent-runtime-reliability.md`，同步 README、PLAN、技术规格及 Agent 文档。Writer 规格调用上限同步已有 `MAX_MODEL_CALLS=15`，本次没有修改该常量；先前历史记录中的 14 保留为当时状态。
+
+实际验证：
+
+- `./.venv/bin/python -m pytest -q`：213 passed，2.41 秒。
+- `./.venv/bin/ruff check src tests`：All checks passed。
+- `./.venv/bin/wonder-research --root . ask-interrupt --help`：参数帮助正常。
+- 离线 scripted demo：waiting_user → succeeded，同一 Turn 两个 Attempt、2 轮、12 tokens；摘要在 `data/audits/20261007-runtime/offline-demo.json`。
+- 合成 v9→v12 保留旧报告 JSON、legacy 成功状态与 2 轮/37 tokens；迁移重复运行、外键检查通过。注入 v11→v12 失败时，DDL 与版本号一起回滚。
+- 主库只读备份至临时副本：当前实际 v11→v12、重复初始化通过，quick_check=ok、外键错误 0；stocks/runs/sources/run_sources/run_steps/draft_sections/draft_reviews/source_conflicts/company_memos 全表哈希、历史临时报告正文、13 个冻结文件字节均未变。31 条研究保留，主库文件哈希未变。副本已自动清理；摘要在 `data/audits/20261007-runtime/migration-rehearsal.json`（Git 忽略）。
+
+限制：主库仍为 v11，未运行真实 DeepSeek/OpenD；下一次正常业务初始化会执行 v12。未知用量可能占满剩余预算而禁止重试，计数此时不是实际账单；硬崩溃恢复通过遗留状态模拟验证，未覆盖全部操作系统时序；锁沿用 macOS/Linux fcntl，未验证 Windows。记忆中文检索、Turn 工作状态、FTS 去重与备份优化尚未实施。下一步建议按架构审计推进上下文/检索优化；19D.2 上手/面试案例与 19E 评测待用户决定，GitHub Actions 继续暂缓。本阶段完成后暂停。
+
+## 2026-10-07：MU 语义审查数值误报修复
+
+- 用户要求解决 `a8bd82aa-eaac-4169-98be-1acdc2f14fcf` 的 `semantic_review_failed`。新增 `writer._verify_numeric_review`：ROE 阈值计数由可信序列核对；ROE 展示精度须匹配归档字段、期间与来源；债务权益比须核对归档操作数、币种/单位、正文公式和四舍五入。无法核实或真实不一致仍保留 error，不修改评分或草稿。
+- 新增 `review-draft --recheck` 离线复核同 hash 的既有模型审查；追加 `semantic-review-v2+offline-numeric-v1` 记录，原审查不覆盖，人工/过期审查不复用。README 与技术规格同步说明。正常模型审查也执行同一数值核对。
+- 本次 MU 复核证明 ROE >15% 为 9 个财年、ROE 尾随零不改变值、债务权益比约 0.77 且口径已经写明；4 条 error 均变为带核对说明的 warning，原有 warnings 保留。主库 run 仍为 draft，hash 未改；未运行模型/OpenD/网络，不自动 finish。
+- 实际运行：`./.venv/bin/wonder-research --root . review-draft a8bd82aa-eaac-4169-98be-1acdc2f14fcf --recheck` → passed；同 run `validate` → valid=true、无 issues。
+- 实际测试：`./.venv/bin/python -m pytest -q` → 200 passed；`./.venv/bin/ruff check src tests` → All checks passed。新增计数、精度、引用、债务比值/口径及过期审查/历史保留回归；现有预算测试改为读取当前 `MAX_MODEL_CALLS`，不再硬编码旧上限。
+- 限制：离线核对只处理明确可证明的数值误报，不代替完整财报补证或人工研究判断。MU 的定性资料缺口仍存在，通过验证不代表证据完整。19D 仍待收口，GitHub Actions 仍按用户要求暂不实施。
+
 ## 当前状态
 
-- 当前阶段：18 开放问题 Agent、来源仲裁、记忆与受限临时计算已完成。富途年度字段、SQLite 页级索引、年报 Capex 输入和离线验证均已完成；中国移动、联通、电信的新草稿均已通过当前 `validate`。中国移动的 Q09 曾被新状态规则识别为 `answered_with_gap`，已通过可恢复分组重试修正并重新审查。三份均保持 draft，不会自动 `finish`。
+- 当前阶段：19C Turn 级 QueryWorkspace、19D.1 最小运行时与可靠性收口已实现；固定研究可靠性收口也已完成。腾讯、中国移动、中国电信的新自然语言研究均通过当前 `validate`，正式报告在隔离副本通过首次和重复 `finish`；三条原 run 均保持 draft，不会自动冻结。
 - 业务软件：固定研究新增六组 EvidencePack、Decimal 可信计算、staged Writer、定向修订、DraftReview、schema v6 `draft_sections`/`draft_reviews`、schema v7 `source_page_fts`、schema v8 来源冲突/Agent Scratchpad/记忆索引/分析审计、`review-draft` 和 finish 语义门闸。既有 collect、交互 Agent、Memo、chat 与历史完成报告保持兼容。
 - 附记正文与估值：仍未实现。真实 DeepSeek API smoke 已跑通；加入 fundamentals 后 HK.00728 草稿由“1 answered/23 partial”变为“24 answered、6/6 门闸 pass、M1–M6 均有分”。
-- writer schema 修复：已加入 `gap` Prompt 约束和一次受控结构修复；修复仍失败保持 `invalid_schema`，不保存草稿、不自动 `finish`。
+- writer schema 修复：分组 Prompt、Schema、解析、缓存和修订统一为 `AnswerSection`；非法 JSON 从原证据输入重新生成一次，结构修复仍限一次。修复失败保持 draft，不自动 `finish`。
 - 报告层：新完成报告使用 Q01–Q24 完整问题文本、中文标签、精确数值格式和短引用索引；TTY 完成反馈列绝对路径，非 TTY 保持 JSON。
-- Writer：默认模板为 `deepseek-staged-v5`；`deepseek-draft-v3` one-shot 仅保留回归。分组 Writer 只接收与该组相关的可信计算，模型提示不替代语义审查，最终 error 不会被自动 finish。
-- 自然语言失败反馈：`validation_failed` 在 TTY 显示问题位置、错误码、解释与 run_id；非 TTY 返回 `ok=false`、issues 和 exit 2，不会误报成功。
-- Skill：Router 仅接收 Catalog 摘要；`skill-list`、`skill-check` 和 `start --skill` 可用。方法正文/reference 只在确认后的 Writer 或交互 Agent 执行边界加载，实际加载的名称、版本、内容哈希进入 run step 或 Agent event，正文不落库。
-- 开放问题：既有 Python Agent loop 新增已归档财务检索、可信固定计算、只读临时数据集、受限分析代码与结果读取。Scratchpad 自动保存可检查的工作状态；长期可信记忆只来自 completed 报告和 `memo-save`，临时报告只作为 provisional episode 索引。
+- Writer：默认模板为 `deepseek-staged-v6`；`deepseek-draft-v3` one-shot 仅保留回归。分组 Writer 只接收与该组相关的可信计算，语义审查与 Python 硬校验共享受限修订单元，最终 error 不会被自动 finish。
+- 自然语言失败反馈：collect/Writer/存储失败返回 `failed_step`、run_id 与可恢复 session；`validate` 失败返回逐项 issues。TTY 可输入“重试”复用原 run，非 TTY 返回 `ok=false` 和 exit 2。
+- Skill：Router 仅接收 Catalog 摘要；`skill-list`、`skill-check` 和 `start --skill` 可用。方法正文/reference 只在确认后的 Writer 或交互 Agent 执行边界加载，实际加载的名称、版本、内容哈希进入 run step 或 Agent event，正文不落库。阶段 19B 新增 Python Tool Registry；交互 `chat` 按所选 Skill 的 `tools` manifest 限定 Agent 可见和可执行的函数。
+- 开放问题：既有 Python Agent loop 新增已归档财务检索、可信固定计算，以及 Turn 级隔离财务快照、只读 SQL、受限函数和证据回执。Scratchpad 自动保存可检查的工作状态；长期可信记忆只来自 completed 报告和 `memo-save`，临时报告只作为 provisional episode 索引。
+- 可观测性：schema v9 的本地 `traces` / `trace_spans` 记录 Writer、Reviewer、Router 和 Agent 的安全元数据时间树。`trace-read RUN_ID` 与 `agent-trace SESSION_ID` 可直接排查；可选 OTLP exporter 可指向本地 Phoenix 或 Langfuse，未配置时仍只用项目 SQLite。用户可显式设置 `WONDER_TRACE_CAPTURE_CONTENT=preview|full`，让后端显示可见 LLM/工具 I/O；正文不会写入项目 SQLite，隐藏推理与凭据仍不采集。
+- 来源核对：修复 `source_conflicts` 的稳定 ID 漏掉 currency 的缺陷。现在同一富途来源、指标和期间的 CNY/HKD 事实会各自持久化，重新写草稿时不会因主键冲突失败。
+- Writer 分组覆盖修复：当 DeepSeek 将证据不足误写成空 `answers` 数组时，初始请求和唯一一次 schema 修复都会明确要求 Q01–Q24 的每个分组完整返回；证据不足必须以 `partial`/`missing` 加完整 `gap` 表示。不会伪造答案、放宽证据校验或自动 `finish`。
+
+## 2026-10-06：记忆、存储与 Agent 架构审计（建议阶段，未实施优化）
+
+用户要求核对现有记忆、wonder.db、Agent/代码架构，调研主流方案并提出下一步计划。本次新增 `docs/22-memory-storage-architecture-review.md`，只记录审计与候选计划，不替代 PLAN 的阶段安排；没有修改业务代码、迁移主库、清理历史或调用真实模型/OpenD。
+
+实际检查：
+
+- `./.venv/bin/python -m pytest -q`：190 passed、1 failed（2.53 秒）。失败仍为 `test_model_call_budget_stops_before_fifteenth_call`；当前 Writer 常量为 15，测试/规格要求最多 14，需要先收口契约，不预填全绿。
+- `./.venv/bin/ruff check src tests`：All checks passed。
+- 主库以 SQLite `mode=ro`/`query_only=ON` 检查：78.59 MiB，实际 schema v9，quick_check=ok、外键检查无错误。当前工作区代码已为 schema v11，包含部分 19D 的 Attempt/respond/retry/按 Turn 报告/model adapter；旧进度不能代表当前全部代码或主库使用状态。
+- 页级 FTS 占 65.40 MiB（83.22%）；15,365 条按公司/字节哈希/locator/content hash 去重为 7,351 条。来源获取事件应保留，重复索引可优化。18,673 条 source_conflicts 全为 provider_unverified；Memory、Scratchpad、Memo、analysis 主库表目前为空。
+- 内存 SQLite 中文检索实验：unicode61 对样例中的“资本开支”零命中，ROE 命中。隔离合成项目故障注入复现：报告写入失败后 Session/Turn/Attempt 已为成功、报告数为 0；现有项目锁没有替代显式数据库事务。
+- 只读统计与隔离实验产物在 `data/audits/20261006-architecture/`，保持 Git 忽略。没有安装额外 Skill/扩展。
+
+建议下一步先完成 19D.1 可靠性收口（事务、预算、进度/中断与迁移），随后分阶段修正现有上下文/中文检索、共享索引/备份覆盖，建立 19E 基线后再做模块整理；完整事实记忆仍留后续阶段。调研来源、具体修改点和验收条件见新增审计文档。这些建议尚未实施，也不宣称已验证真实模型或框架迁移收益。
+
+## 2026-10-06：交互 Agent 内部组织（19C 前置整理）
+
+- 将原 1,321 行 `agent.py` 整理为约 900 行的会话入口和有限循环；新增 `agent_policy.py`、`agent_tools.py`、`agent_memory.py` 与 `agent_errors.py`。公开 CLI 与 Python 入口不变。
+- System prompt 改由 `agent_policy.build_system_prompt()` 动态组装：不可变权限/引用/JSON 协议在前，受信任 Tool Registry schema 居中，已选 Skill 的方法正文最后追加。Skill 仍不能创建 Tool、授予权限或覆盖 Python 校验。
+- Scratchpad、上下文压缩和可信长期记忆移动到 `agent_memory.py`；Tool handler、参数解析、ticker/run/source/Memo 归属检查移动到 `agent_tools.py`。主循环继续顺序执行受控 Tool，不引入 Pi runtime、并行 Tool、steering queue、多 Agent 或新模型供应商。
+- 参考 Pi Agent Core 当前的 loop/context/Tool 分层，但仅采用小模块边界；详细说明见 [docs/20-agent-runtime-organization.md](docs/20-agent-runtime-organization.md)。这不是 19C 的 Turn/QueryWorkspace 实现，阶段计划不变。
+
+## 2026-10-06：阶段 19C QueryWorkspace
+
+- schema 升至 v10：新增不可变 `agent_turns` 与 `agent_evidence_receipts`，`analysis_runs` 记录可空 `turn_id` 和 `sql_hash`。每次 `ask`、`ask-followup` 都新建 Turn；v9→v10 为旧 session 写入 `legacy-<session_id>` 并关联既有分析记录，不改写历史事件、报告、Memo 或正式研究。
+- 新增 `query_workspace.py`：仅从当前 run 的归档结构化数值构造 `financial_facts` / `source_metadata` SQLite 快照。快照位于 `data/tmp/analysis/<session>/<turn>/<analysis>/`，不含来源全文、正式报告、Memo 或项目主数据库内容；至多 10,000 条事实，写完改为只读。
+- v3 `analysis-workspace` Skill 新增 `describe_analysis_schema`、`run_readonly_sql`、`run_analysis_function`、`read_analysis_artifact`。SQL 仅允许一条 `SELECT` / `WITH ... SELECT`，在独立受限子进程的 immutable 只读快照上通过 authorizer、`query_only`、progress handler、10 秒/256 MB/64 KB/400 行限制执行；函数只能处理对应 SQL 行，使用受限 AST 与无项目环境变量的子进程。
+- 只有 SQL 结果直接返回 `fact_id` 时，程序才反查真实 `source_id + locator` 为可引用事实；实际返回的来源会写入当前 Turn 的回执。新版 Skill 路径的临时报告引用必须命中同一 Turn、同一来源哈希的回执。SQL/函数错误以稳定码回给模型；重复同一错误或连续三次 QueryWorkspace 错误会停止本 Turn。
+- 未实现 19D 的 Attempt、可恢复状态机、重试/补充 CLI、按 Turn 保存临时报告历史或通用 model adapter；没有改动固定 `ResearchRun`、评分、门闸、Writer、`validate` 或 `finish`。未调用真实 DeepSeek/OpenD，也没有生成、改写或冻结正式报告。
+- 详细教学说明见 [docs/21-query-workspace.md](docs/21-query-workspace.md)。
+
+验证：
+
+- `./.venv/bin/python -m pytest -q tests/test_stage19_query_workspace.py`：5 passed（v9→v10 legacy migration、快照/函数/回执、SQL/AST 拒绝、Turn 级次数限制、可恢复错误后的 fake-model 成功路径）。
+- `./.venv/bin/ruff check src tests`：All checks passed。
+- `./.venv/bin/python -m pytest -q tests/test_agent.py tests/test_stage18_agent.py tests/test_tool_registry.py tests/test_skill_registry.py tests/test_observability.py tests/test_stage19_query_workspace.py`：38 passed。
+- `./.venv/bin/python -m pytest -q`：186 passed、1 failed；唯一失败是已有 `tests/test_stage16_quality.py::test_model_call_budget_stops_before_fifteenth_call` 期待 Writer 在第 15 次调用前抛错，但当前 Writer 未抛错。它与 19C 文件及行为无关，本阶段未混入 Writer 修改。
+- `./.venv/bin/wonder-research --root . skill-check analysis-workspace`：通过；Skill v3 解析到六个已注册、capability 兼容的工具。
+
+## 2026-10-06：Langfuse OTLP / Agent Graph 配置
+
+- `WONDER_TRACE_EXPORTER=langfuse` 复用现有 OpenTelemetry exporter；从 `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`（或项目的 `WONDER_LANGFUSE_*` 等价变量）在内存中构造 Basic Auth，默认发送到 EU Cloud 的 OTLP trace endpoint，也支持 US、日本及自托管根 URL 或完整 endpoint 覆盖。
+- 导出时自动携带 Langfuse v4 的 `x-langfuse-ingestion-version: 4`、`langfuse.observation.type`、trace name 和 Agent `session_id`，使 LLM、Tool、Agent/Chain 能在 Agent Graph 的 Aggregated / Expanded 视图中正确显示与归组。
+- `preview` / `full` 内容模式额外映射到 Langfuse observation input/output；SQLite、`trace-read` 和 `agent-trace` 继续只保留摘要。公钥、密钥、Authorization 和隐藏推理不记录、不打印、不写入本地数据库。
+- `.env.example`、README、技术规格和 `docs/16-tracing-and-phoenix.md` 已补充配置、清理命令及隐私边界。验证：`tests/test_observability.py tests/test_agent.py` 为 `10 passed`；Ruff 与 `git diff --check` 通过。未使用真实 Langfuse key、未发送外部 trace、未调用 DeepSeek 或改写研究报告。
+
+## 2026-10-06：固定研究真实流程可靠性收口
+
+- 根因：腾讯三次 Q01–Q04 失败均为模型正常 `stop` 后返回损坏 JSON；旧解析器扫描到内部 Statement/Gap，却最终误报 `invalid_section_coverage（实际为空）`。提示要求对象、附带 Schema 却是数组，也造成契约冲突。
+- 修复：新增 `AnswerSection`，统一 Prompt/Schema/解析/缓存/修订；损坏外层 JSON 保留真实错误位置。非法 JSON 修复从原 EvidencePack 重新生成，不复制损坏响应。EvidencePack 原文只发送一次，question_chunks 使用引用索引；腾讯首组 prompt 由约 30,700 降至约 21,800 token。
+- 综合判断接受精确 G/M ID 映射的无损归一化；DraftReview error 与 Python 确定性校验 error 合并进入最多五单元的修订循环。缺权威支持时只能删除陈述或降级答案并补 gap，不能把 context 改 supports。
+- chat 在 collect/Writer/存储/finish 失败时保存 run_id、failed_step 和恢复动作；同一 session 输入“重试”复用原 run、归档来源和成功分组，不重新 collect。
+- 真实验收：腾讯 `36312547-ca74-4e2d-9b6e-a8b98e9e22a6`、中国移动 `eac6fecc-3e80-4524-af4b-c4b3ae677c7a`、中国电信 `81f8aa26-41f2-41f7-a445-65472ecc8cc5` 均完成 24 Q / 6 Gate / 6 Moat 并通过 validate。三条原 run 保持 draft。
+- 隔离 finish：三条 run 分别复制到 `data/tmp/fixed-flow-check/freeze/<run_id>/`，首次与重复 finish 均通过，生成 company.md、research.json、quality-review.json；draft/review hash、产物哈希与覆盖数量一致。
+- 用户原 `uv run --extra observability` 入口对三条 run 分别执行 `validate`，均返回 `ok=true, valid=true, issues=[]`；受限环境使用 `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache`，避免写用户全局 uv cache。
+- 验证：`.venv/bin/python -m pytest -q` → `174 passed`；`.venv/bin/ruff check src tests` → `All checks passed!`。详细说明见 `docs/18-fixed-flow-reliability.md`。
+
+已知限制：自动审查和程序校验不能证明研究结论正确；三份原草稿仍需用户检查 warning、数值口径和判断后再决定是否正式 finish。Reviewer 输入仍较大，后续可在不删除已引用证据的前提下继续压缩。
+
+## 2026-10-06：Writer 空分组回答修复
+
+- `writer._answer_messages()` 现在将“每题恰好一次、`answers` 不得为空、缺证据仍返回 `partial`/`missing` + `gap`”作为分组 Writer 的显式约束。
+- `writer._section_repair_messages()` 在修复 `invalid_section_coverage` 时收到该分组的精确 QID 列表，明确禁止返回空数组，并说明补缺口不属于新增事实；仍只保留一次受控修复。
+- `tests/test_stage16_quality.py` 新增回归：首轮 `{"answers": []}` 后，修复响应覆盖 Q01–Q04 时可完成整条 staged Writer 路径，并断言修复提示含完整覆盖契约。
+- 验证：`UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：163 passed；`UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。未调用真实 DeepSeek，也未改写、冻结任何研究报告。
+
+## 2026-10-06：来源核对主键修复
+
+- `source_policy.reconcile_sources()` 的 `SourceConflict.id` 现在同时纳入 provider source、metric、period、currency 和 official source；此前漏掉 currency，导致中国电信 run 的同指标同期间 CNY/HKD 事实得到相同 SQLite 主键。
+- `tests/test_stage18_agent.py` 新增双币种回归：同一 field/period 的 CNY 与 HKD 都必须写入，且 ID 不相同。
+- 验证：`UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：162 passed；`UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。
+- 针对真实中国电信 run `e5d20c8c-2bd5-4fa3-a8d3-db873a79d52b` 的只读重算得到 `facts=1174`、`unique_ids=1174`；修复前为 1174 / 895。尚未再次调用 DeepSeek 或保存正式草稿。
 
 ## 已准备的交接文件
 
 README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md、docs/teaching-contract.md、docs/provenance.md、docs/09-agent-layer.md、docs/15-open-question-agent.md、skills/company-analysis-method/、skills/interactive-research-agent/、skills/analysis-workspace/ 和本文件。
 
-## 下一步（阶段 19 前暂停）
+## 下一步：阶段 19D 最小运行时、上手与面试案例
 
-用户可查看中国移动 `fe6ecce2…`、中国联通 `e491dee8…` 和中国电信 `e5d20c8…` 的新草稿及结构化审查。重点核对 Q03、Q04、Q05、Q07、Q09、Q14、Q21、Q23 的问题对齐、当期口径和原文 locator；所有 run 仍保持 draft，只有用户决定后才能 `finish`。下一阶段先补 SEC XBRL、专题数据源和局部 PDF/OCR 基准；Pi Agent Core、多 Agent 与强隔离 runtime 都保留到阶段 20 的同题基准评估，当前不迁移技术栈、不引入 LangGraph。
+三家电信新草稿仍保持 draft，用户可以继续验收；这不阻塞下一阶段。19D 将在 19C 的 Turn 边界上增加 Attempt、受控状态迁移、失败/等待恢复、按 Turn 保留临时报告和最小 model adapter；随后补 Quick Start、离线 CI 与面试案例。跨场景评测基线仍在 19E，记忆专项评测、Pi 和多 Agent 不提前引入。
+
+## 阶段 19B 记录
+
+阶段：19B，Skill 驱动的受控工具路由。
+
+完成日期：2026-10-05。
+
+实现内容：
+
+- 新增 `tool_registry.py`，集中登记稳定工具 ID、描述、Pydantic 参数 schema、适用 capability、默认可见状态和 Python handler；无 handler 的工具不会出现在模型 schema。
+- `skill.json` 增加可选 `tools`。Catalog 拒绝未知/重复工具、method Skill 声明工具、工具与 capability 不匹配或无已注册 handler 的情况；审计元数据记录每个 Skill 声明的工具。
+- `chat` 确认后的交互执行只向 Agent 提供 capability 基础工具与所选 Skill grants 的合并集合，执行时用同一 allowlist 再校验。未授权工具调用在触及数据库或 handler 前返回 `unauthorized_tool`。
+- 将 `analysis-workspace` Skill 绑定到 `interactive_research`，通过 manifest 开放财务查询、可信计算、只读数据集、受限代码执行和结果读取。原 `interactive-research-agent` Skill 正文和 manifest 未改；直接 `ask` 仍支持原有完整工具集合。
+- Agent session 记录 Skill audit、工具 allowlist 和 registry version；follow-up 重载并检查哈希和授权，权限或 Skill 变化时停止。旧审计记录缺少 `tools` 字段时按空声明兼容，旧 run 的 Writer Skill 恢复也保持兼容。
+- Fixed Research 的 EvidencePack、固定写作步骤、校验和 finish 门闸没有改变。Agent loop 继续在可用工具内自主决定调用顺序，不新增 LangGraph、多 Agent 或任意 shell。
+
+验证：
+
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q tests/test_tool_registry.py tests/test_skill_registry.py tests/test_agent.py`：21 passed。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：161 passed。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。
+- `./.venv/bin/wonder-research --root . skill-check analysis-workspace`：通过，五个工具都已注册且 capability 兼容。
+- 没有调用真实模型、OpenD 或证券账户接口，也没有生成/修改/冻结任何正式研究报告。新增测试包含 Session follow-up 授权恢复；真实 DeepSeek Router 是否稳定选择该 Skill 尚未做在线 smoke。
+
+详细实现说明和权限边界见 [docs/17-skill-driven-tool-routing.md](docs/17-skill-driven-tool-routing.md)。
+
+## 阶段 19A 记录
+
+阶段：19A，DeepSeek / Agent 调用轨迹与可选本地 Phoenix。
+
+完成日期：2026-10-05。
+
+实现内容：
+
+- schema v9 新增 `traces`、`trace_spans` 与按 run/session 的索引。顶层 trace 关联 `RUN_ID` 或 `SESSION_ID`；child span 保存 parent、类型、状态、时序和受控属性，失败仅保存错误类型/码。
+- 新增 `observability.py`。Writer、Reviewer、Router、Agent 的模型调用和 Agent 工具调用均围绕标准 `llm`、`tool`、`chain` span；默认完整 prompt、问题、模型输出、工具结果、隐藏推理、认证头、API key 与异常原文都会过滤。输入/参数/结果仅以长度和 SHA-256 摘要出现。
+- 新增只读 CLI `trace-read RUN_ID`、`agent-trace SESSION_ID`，输出保持既有 JSON stdout 契约。原有 `agent_events`、Scratchpad 与 `ask-status` 不改变。
+- Phoenix 兼容属性：LLM span 另发 OpenInference 标准 `llm.model_name`、`llm.token_count.*`，Agent 根 span 使用 `AGENT`，Writer/Router 使用 `CHAIN`。Agent 另有 `agent.iteration`、`agent.decision`、`tool.*` 和 `skills.selected` 节点，能展示实际工具轨迹。默认仍不发送正文；经用户要求，新增 `WONDER_TRACE_CAPTURE_CONTENT=preview|full`，仅向 OTLP/Phoenix 导出可见 LLM input/output、工具 arguments/result，绝不写入 SQLite、导出隐藏推理或凭据。
+- 增加 `observability` optional dependency group（OpenTelemetry API、SDK、OTLP/HTTP exporter）。`WONDER_TRACE_EXPORTER=otlp`、`WONDER_OTLP_ENDPOINT` 和 `WONDER_TRACE_PROJECT` 可将同一安全属性发送到 Phoenix 或其他 OTLP/HTTP collector；项目名同时作为 `service.name` 与 `openinference.project.name` 发出，确保 Phoenix 归入指定项目。没有依赖或 collector 不可用仍保留本地 trace，不影响研究/Agent 的业务结果。
+- 新增 `docs/16-tracing-and-phoenix.md`，同步 README、计划和技术规格；Phoenix 运行于项目外部，本项目不依赖其运行或保存其数据。
+
+验证：
+
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with pytest python -m pytest -q`：151 passed（2026-10-05）。新增覆盖本地 trace 的 run 关联、CLI、敏感正文/密钥不落库、Agent tool span 与 v1→v9 migration。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache PYTHONPATH=src:. uv run --no-project --with ruff ruff check src tests`：All checks passed。
+- `UV_CACHE_DIR=/private/tmp/coding_agent_uv_cache uv lock`：已更新 `uv.lock`，锁定 optional OpenTelemetry 依赖。
+- `WONDER_TRACE_EXPORTER=otlp ... uv run --extra observability python -c ...`：SDK/exporter 初始化成功；该 import 验证本身未启动 Phoenix、未发送真实 DeepSeek 请求或改写研究产物。
+- 中国电信 `write-draft` 真实运行（2026-10-05）：本地 trace `f5d5c717…` 记录 9 个成功 LLM span 后以 `evidence_outside_pack` 失败；未调用 `finish`。随后补充 Phoenix 使用的 `openinference.project.name` resource 属性，并以 optional exporter 读取该属性确认值为 `wonder-stockresearch`。
+- `tests/test_observability.py tests/test_agent.py`：9 passed；完整离线测试：153 passed；`ruff check src tests`：All checks passed（补充标准 OpenInference LLM/Agent 属性、正文采集开关及 Agent iteration/decision span 后）。
+
+已知限制：本阶段不追溯历史调用；`trace-read` 对未调用 Writer/Reviewer 的 run 返回空数组。自然语言 Router 的分类是在确定 run/session 前发生，因此保留为独立 trace，不能伪造为后续正式研究或 Agent 的父节点。Phoenix 只展示启动 exporter 后的新 trace，需由用户在本机另行启动；本次未做真实 collector 联通 smoke。
+
+下一步：由用户决定是否在本机启动 Phoenix 完成一次非敏感的真实 Agent/Writer smoke，或转入阶段 19 的 SEC XBRL、专题数据源和 PDF/OCR 基准。
 
 ## 阶段 16.1 记录
 
@@ -126,7 +479,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - `write-draft ... --strategy staged`：三家公司真实 DeepSeek 运行，均生成完整结构并执行审查；没有调用 `finish`。
 - schema v5 → v6 实际迁移成功；已有 completed run 的 schema_version 与产物未改写。
 
-新增/修改文件：`src/wonder_stockresearch/fixed_quality.py`、`models.py`、`storage.py`、`research.py`、`writer.py`、`cli.py`、`tests/test_stage16_quality.py` 及相关回归测试、`docs/13-fixed-research-quality.md`、README、PLAN、技术规格和本文件。
+新增/修改文件：`src/wonder_stockresearch/fixed/fixed_quality.py`、`models.py`、`storage.py`、`research.py`、`writer.py`、`cli.py`、`tests/test_stage16_quality.py` 及相关回归测试、`docs/13-fixed-research-quality.md`、README、PLAN、技术规格和本文件。
 
 已知限制：三家均通过自动门闸，但 warning 仍需用户人工审阅后才应 finish。Reviewer token 较高且仍会误报，Python 只降级可确定识别的自相矛盾，不替模型放行实质问题。当前证据检索为关键词排序，不是语义检索。阶段 17 已完成；阶段 18 的临时计算环境尚未开始。
 
@@ -148,7 +501,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - 固定 `chat` 现在展示 `validation_failed` 的问题位置、错误码、说明、run_id 和未定稿提示；非 TTY 使用 `ok=false` JSON、逐项 issues 和 exit code 2。
 - 不修改历史 completed 报告，也未覆盖当前 run 的草稿；未调用 DeepSeek。修正提示仍需实际模型重跑才能验证语义效果。
 
-新增/修改文件：`src/wonder_stockresearch/questions.py`、`src/wonder_stockresearch/reports.py`、`src/wonder_stockresearch/writer.py`、`src/wonder_stockresearch/chat.py`、`src/wonder_stockresearch/cli.py`、`tests/test_writer.py`、`tests/test_chat.py`、`docs/07-deepseek-writer.md`、`docs/10-standalone-natural-language.md`、`docs/12-question-alignment-and-validation-feedback.md`、`docs/technical-spec.md`、`PLAN.md`、`README.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/fixed/questions.py`、`src/wonder_stockresearch/fixed/reports.py`、`src/wonder_stockresearch/fixed/writer.py`、`src/wonder_stockresearch/chat.py`、`src/wonder_stockresearch/cli.py`、`tests/test_writer.py`、`tests/test_chat.py`、`docs/07-deepseek-writer.md`、`docs/10-standalone-natural-language.md`、`docs/12-question-alignment-and-validation-feedback.md`、`docs/technical-spec.md`、`PLAN.md`、`README.md` 和本文件。
 
 验证命令与实测结果：
 
@@ -176,7 +529,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 - 重复的相同引用及陈述与数值之间完全相同的引用只显示一次；不同来源定位或关系保留。Decimal 数值添加千位分隔，保留全部小数位，不换币种、不舍入，单位与币种相同则不重复。
 - 不修改数据模型、数据库 schema、评分、Writer Prompt 或已完成报告。本阶段没有调用 DeepSeek，也没有重写现存 `data/` 产物。
 
-新增/修改文件：`src/wonder_stockresearch/reports.py`、`src/wonder_stockresearch/cli.py`、`tests/test_reports.py`、`tests/test_storage.py`、`tests/test_chat.py`、`docs/11-report-presentation.md`、`docs/technical-spec.md`、`PLAN.md`、`README.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/fixed/reports.py`、`src/wonder_stockresearch/cli.py`、`tests/test_reports.py`、`tests/test_storage.py`、`tests/test_chat.py`、`docs/11-report-presentation.md`、`docs/technical-spec.md`、`PLAN.md`、`README.md` 和本文件。
 
 验证命令与实测结果：
 
@@ -241,7 +594,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 实际验证：
 
 - `PYTHONPATH=src:. uv run --no-project --with pytest --with pydantic --with requests python -m pytest -q tests/test_writer.py`：16 passed。
-- `PYTHONPATH=src:. uv run --no-project --with ruff ruff check src/wonder_stockresearch/writer.py tests/test_writer.py`：All checks passed。
+- `PYTHONPATH=src:. uv run --no-project --with ruff ruff check src/wonder_stockresearch/fixed/writer.py tests/test_writer.py`：All checks passed。
 
 已知限制：本次只修复结构校验失败，不自动修复非法 JSON、网络错误或事实/引用错误；真实保利物业 run 需要在用户配置 DeepSeek API 后重新执行 `write-draft` 验证模型实际修复率。
 
@@ -251,7 +604,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-22。
 
-新增/修改文件：`src/wonder_stockresearch/progress.py`、`src/wonder_stockresearch/router.py`、`src/wonder_stockresearch/skill_registry.py`、`src/wonder_stockresearch/chat.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/writer.py`、`src/wonder_stockresearch/agent.py`、`src/wonder_stockresearch/cli.py`、`src/wonder_stockresearch/symbols.py`、`tests/test_chat.py`、`tests/test_symbols.py`、`README.md`、`AGENTS.md`、`PLAN.md`、`docs/09-agent-layer.md`、`docs/10-standalone-natural-language.md`、`docs/technical-spec.md`、`skills/company-research/SKILL.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/progress.py`、`src/wonder_stockresearch/router.py`、`src/wonder_stockresearch/skill_registry.py`、`src/wonder_stockresearch/chat.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/fixed/writer.py`、`src/wonder_stockresearch/agent.py`、`src/wonder_stockresearch/cli.py`、`src/wonder_stockresearch/symbols.py`、`tests/test_chat.py`、`tests/test_symbols.py`、`README.md`、`AGENTS.md`、`PLAN.md`、`docs/09-agent-layer.md`、`docs/10-standalone-natural-language.md`、`docs/technical-spec.md`、`skills/company-research/SKILL.md` 和本文件。
 
 实现内容：
 
@@ -310,7 +663,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-21。
 
-新增/修改文件：`src/wonder_stockresearch/futu_fundamentals.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/writer.py`、`src/wonder_stockresearch/cli.py`、`tests/test_fundamentals.py`、`docs/08-futu-data-capabilities.md`、`docs/research-spec.md`、`docs/technical-spec.md`、`README.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/futu_fundamentals.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/fixed/writer.py`、`src/wonder_stockresearch/cli.py`、`tests/test_fundamentals.py`、`docs/08-futu-data-capabilities.md`、`docs/research-spec.md`、`docs/technical-spec.md`、`README.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -331,7 +684,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-21。
 
-新增/修改文件：`src/wonder_stockresearch/writer.py`、`src/wonder_stockresearch/envfile.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/cli.py`、`.gitignore`、`.env.example`、`tests/test_writer.py`、`tests/test_envfile.py`、`tests/test_run_steps.py`、`docs/07-deepseek-writer.md`、`README.md`、`PLAN.md`、`AGENTS.md`、`docs/technical-spec.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/fixed/writer.py`、`src/wonder_stockresearch/envfile.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/cli.py`、`.gitignore`、`.env.example`、`tests/test_writer.py`、`tests/test_envfile.py`、`tests/test_run_steps.py`、`docs/07-deepseek-writer.md`、`README.md`、`PLAN.md`、`AGENTS.md`、`docs/technical-spec.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -356,7 +709,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-21。
 
-新增/修改文件：`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/reports.py`、`src/wonder_stockresearch/cli.py`、`tests/test_review_and_backup.py`、`docs/06-review-and-maintenance.md`、`README.md`、`PLAN.md`、`docs/technical-spec.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/fixed/reports.py`、`src/wonder_stockresearch/cli.py`、`tests/test_review_and_backup.py`、`docs/06-review-and-maintenance.md`、`README.md`、`PLAN.md`、`docs/technical-spec.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -377,7 +730,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-20。
 
-新增/修改文件：`skills/company-research/SKILL.md`、`opencode.json`、`src/wonder_stockresearch/research.py`、`tests/test_evidence_as_of.py`、`tests/test_sources.py`、`docs/05-opencode-and-tools.md`、`docs/research-spec.md`、`docs/technical-spec.md`、`README.md`、`PLAN.md` 和本文件。
+新增/修改文件：`skills/company-research/SKILL.md`、`opencode.json`、`src/wonder_stockresearch/fixed/research.py`、`tests/test_evidence_as_of.py`、`tests/test_sources.py`、`docs/05-opencode-and-tools.md`、`docs/research-spec.md`、`docs/technical-spec.md`、`README.md`、`PLAN.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -399,7 +752,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-20。
 
-新增/修改文件：`src/wonder_stockresearch/market.py`、`src/wonder_stockresearch/disclosures.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/cli.py`、`pyproject.toml`、`uv.lock`、`tests/test_run_steps.py`、`tests/test_collect.py`、`docs/04-data-connectors.md`、`README.md`、`docs/technical-spec.md`、`docs/provenance.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/market.py`、`src/wonder_stockresearch/disclosures.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/cli.py`、`pyproject.toml`、`uv.lock`、`tests/test_run_steps.py`、`tests/test_collect.py`、`docs/04-data-connectors.md`、`README.md`、`docs/technical-spec.md`、`docs/provenance.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -420,7 +773,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-20。
 
-新增/修改文件：`src/wonder_stockresearch/sources.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/cli.py`、`pyproject.toml`、`uv.lock`、`tests/test_sources.py`、`docs/03-sources-and-evidence.md`、`README.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/sources.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/cli.py`、`pyproject.toml`、`uv.lock`、`tests/test_sources.py`、`docs/03-sources-and-evidence.md`、`README.md` 和本文件。
 
 实际运行命令与结果：
 
@@ -441,7 +794,7 @@ README.md、AGENTS.md、PLAN.md、docs/research-spec.md、docs/technical-spec.md
 
 完成日期：2026-09-18。
 
-新增/修改文件：`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/research.py`、`src/wonder_stockresearch/cli.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/reports.py`、`tests/test_storage.py`、`docs/02-storage-and-history.md`、`README.md`、`PLAN.md`、`docs/research-spec.md`、`docs/technical-spec.md` 和本文件。
+新增/修改文件：`src/wonder_stockresearch/storage.py`、`src/wonder_stockresearch/fixed/research.py`、`src/wonder_stockresearch/cli.py`、`src/wonder_stockresearch/models.py`、`src/wonder_stockresearch/fixed/reports.py`、`tests/test_storage.py`、`docs/02-storage-and-history.md`、`README.md`、`PLAN.md`、`docs/research-spec.md`、`docs/technical-spec.md` 和本文件。
 
 实际运行命令与结果：
 

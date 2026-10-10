@@ -10,6 +10,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import resource
 import subprocess
 import sys
@@ -17,8 +18,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import fixed_quality, storage
-from .models import Source
+from wonder_stockresearch import financial_calculations, storage
+from wonder_stockresearch.interactive import agent_company
+from wonder_stockresearch.models import Source
 
 MAX_EXECUTIONS_PER_SESSION = 3
 MAX_DATASET_RECORDS = 400
@@ -37,28 +39,60 @@ class AnalysisWorkspaceError(Exception):
 
 
 def _canonical_hash(value: object) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _source_models(connection: object, run_id: str | None, ticker: str) -> list[Source]:
-    rows = (
-        storage.get_run_sources(connection, run_id)
-        if run_id
-        else storage.list_sources_for_ticker(connection, ticker)
+def _source_models(
+    connection: object,
+    run_id: str | None,
+    ticker: str,
+    session_id: str = "",
+    turn_id: str | None = None,
+) -> list[Source]:
+    rows = agent_company.context_sources(
+        connection, {"ticker": ticker, "run_id": run_id, "id": session_id, "turn_id": turn_id}
     )
     return [Source.model_validate_json(row["source_json"]) for row in rows]
 
 
-def archived_financials(root: Path, row: dict[str, Any], query: str, *, limit: int) -> dict[str, Any]:
+def archived_financials(
+    root: Path, row: dict[str, Any], query: str, *, limit: int
+) -> dict[str, Any]:
     ticker = str(row["ticker"])
     run_id = str(row["run_id"]) if row.get("run_id") else None
+    company = agent_company.facts(root, row)
+    if company is not None:
+        terms = [term for term in re.split(r"[\s,，;；、]+", query.casefold().strip()) if term]
+        records = [
+            {**item, "value": item["value_decimal"]}
+            for item in company["financial_facts"]
+            if not terms
+            or any(term in (item["label"] + " " + str(item["period"])).casefold() for term in terms)
+        ]
+        records.sort(key=lambda item: (str(item["period"]), item["label"]), reverse=True)
+        return {
+            "ticker": ticker,
+            "run_id": run_id,
+            "query": query,
+            "match_mode": "any_term",
+            "records": records[: max(1, min(limit, MAX_DATASET_RECORDS))],
+            "truncated": len(records) > limit,
+            "coverage": company["coverage"],
+        }
     with storage.open_db(root) as connection:
-        sources = _source_models(connection, run_id, ticker)
-    needle = query.casefold().strip()
+        sources = _source_models(
+            connection, run_id, ticker, str(row.get("id", "")), row.get("turn_id")
+        )
+    # 模型常一次请求多个指标；空白/中英文分隔符表示 OR，不是一个长子串。
+    terms = [term for term in re.split(r"[\s,，;；、]+", query.casefold().strip()) if term]
     records = []
-    for item in fixed_quality._numeric_inputs(sources, root):
-        if needle and needle not in item.label.casefold() and needle not in item.period.casefold():
+    for item in financial_calculations.numeric_inputs(sources, root):
+        if terms and not any(
+            term in item.label.casefold() or term in item.period.casefold() for term in terms
+        ):
             continue
         records.append(
             {
@@ -76,6 +110,7 @@ def archived_financials(root: Path, row: dict[str, Any], query: str, *, limit: i
         "ticker": ticker,
         "run_id": run_id,
         "query": query,
+        "match_mode": "any_term",
         "records": records[: max(1, min(limit, MAX_DATASET_RECORDS))],
         "truncated": len(records) > limit,
     }
@@ -85,11 +120,18 @@ def trusted_calculation(root: Path, row: dict[str, Any], metric: str) -> dict[st
     ticker = str(row["ticker"])
     run_id = str(row["run_id"]) if row.get("run_id") else None
     with storage.open_db(root) as connection:
-        sources = _source_models(connection, run_id, ticker)
-    calculations = {item.metric: item for item in fixed_quality.calculate_trusted_metrics(root, sources)}
+        sources = _source_models(
+            connection, run_id, ticker, str(row.get("id", "")), row.get("turn_id")
+        )
+    calculations = {
+        item.metric: item
+        for item in financial_calculations.calculate_trusted_metrics(root, sources)
+    }
     calculation = calculations.get(metric)
     if calculation is None:
-        raise AnalysisWorkspaceError("trusted_calculation_unavailable", f"没有可用的可信计算：{metric}")
+        raise AnalysisWorkspaceError(
+            "trusted_calculation_unavailable", f"没有可用的可信计算：{metric}"
+        )
     return {
         "ticker": ticker,
         "run_id": run_id,
@@ -103,7 +145,9 @@ def create_dataset(root: Path, row: dict[str, Any], query: str, *, limit: int) -
     with storage.open_db(root) as connection:
         existing = storage.list_analysis_runs(connection, session_id)
     if len(existing) >= MAX_EXECUTIONS_PER_SESSION:
-        raise AnalysisWorkspaceError("analysis_execution_limit", "每个 session 最多创建三次临时分析执行")
+        raise AnalysisWorkspaceError(
+            "analysis_execution_limit", "每个 session 最多创建三次临时分析执行"
+        )
     archived = archived_financials(root, row, query, limit=limit)
     records = archived["records"]
     if not records:
@@ -202,7 +246,17 @@ _ALLOWED_NODES = {
     ast.NotIn,
 }
 _ALLOWED_CALLS = {
-    "abs", "float", "int", "len", "max", "mean", "median", "min", "round", "sorted", "sum"
+    "abs",
+    "float",
+    "int",
+    "len",
+    "max",
+    "mean",
+    "median",
+    "min",
+    "round",
+    "sorted",
+    "sum",
 }
 
 
@@ -212,11 +266,15 @@ def validate_code(code: str) -> None:
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as error:
-        raise AnalysisWorkspaceError("invalid_analysis_code", f"临时代码语法错误：{error.msg}") from error
+        raise AnalysisWorkspaceError(
+            "invalid_analysis_code", f"临时代码语法错误：{error.msg}"
+        ) from error
     assigned_result = False
     for node in ast.walk(tree):
         if type(node) not in _ALLOWED_NODES:
-            raise AnalysisWorkspaceError("analysis_code_not_allowed", f"不允许的 Python 语法：{type(node).__name__}")
+            raise AnalysisWorkspaceError(
+                "analysis_code_not_allowed", f"不允许的 Python 语法：{type(node).__name__}"
+            )
         if isinstance(node, ast.Attribute):
             raise AnalysisWorkspaceError("analysis_code_not_allowed", "不允许属性访问")
         if isinstance(node, ast.Name) and (node.id.startswith("_") or "__" in node.id):
@@ -234,10 +292,12 @@ def validate_code(code: str) -> None:
         if isinstance(node, ast.comprehension) and node.is_async:
             raise AnalysisWorkspaceError("analysis_code_not_allowed", "不允许异步推导式")
     if not assigned_result:
-        raise AnalysisWorkspaceError("analysis_code_result_missing", "临时代码必须给 result 赋 JSON 兼容值")
+        raise AnalysisWorkspaceError(
+            "analysis_code_result_missing", "临时代码必须给 result 赋 JSON 兼容值"
+        )
 
 
-_RUNNER = r'''
+_RUNNER = r"""
 import ast, json, sys
 from statistics import median
 
@@ -254,7 +314,7 @@ if "result" not in scope:
     raise ValueError("result missing")
 encoded = json.dumps(scope["result"], ensure_ascii=False, allow_nan=False, default=str)
 print(encoded)
-'''
+"""
 
 
 def _limit_resources() -> None:
@@ -276,18 +336,26 @@ def run_code(root: Path, row: dict[str, Any], analysis_id: str, code: str) -> di
     session_id = str(row["id"])
     with storage.open_db(root) as connection:
         analysis = storage.get_analysis_run(connection, analysis_id)
-    if analysis is None or analysis["session_id"] != session_id or analysis["ticker"] != row["ticker"]:
+    if (
+        analysis is None
+        or analysis["session_id"] != session_id
+        or analysis["ticker"] != row["ticker"]
+    ):
         raise AnalysisWorkspaceError("unknown_analysis_run", "分析执行不属于当前 session")
     if analysis["status"] != "dataset_ready":
         raise AnalysisWorkspaceError("analysis_not_ready", "该数据集已经执行或不可用")
     workspace = root / str(analysis["workspace_path"])
     input_path = workspace / "input.json"
     if not input_path.is_file():
-        raise AnalysisWorkspaceError("analysis_dataset_missing", "分析数据集文件不存在", exit_code=1)
+        raise AnalysisWorkspaceError(
+            "analysis_dataset_missing", "分析数据集文件不存在", exit_code=1
+        )
     try:
         dataset = json.loads(input_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise AnalysisWorkspaceError("analysis_dataset_invalid", "分析数据集无法读取", exit_code=1) from error
+        raise AnalysisWorkspaceError(
+            "analysis_dataset_invalid", "分析数据集无法读取", exit_code=1
+        ) from error
     code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
     storage.write_atomic(workspace / "code.py", code)
     (workspace / "code.py").chmod(0o444)
@@ -310,12 +378,16 @@ def run_code(root: Path, row: dict[str, Any], analysis_id: str, code: str) -> di
         _finish_failed(root, analysis_id, "analysis_failed", "临时代码被限制或执行失败", code_hash)
         raise AnalysisWorkspaceError("analysis_failed", "临时代码被限制或执行失败")
     if len(completed.stdout.encode("utf-8")) > MAX_OUTPUT_BYTES:
-        _finish_failed(root, analysis_id, "analysis_output_too_large", "临时结果超过 64 KB", code_hash)
+        _finish_failed(
+            root, analysis_id, "analysis_output_too_large", "临时结果超过 64 KB", code_hash
+        )
         raise AnalysisWorkspaceError("analysis_output_too_large", "临时结果超过 64 KB")
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        _finish_failed(root, analysis_id, "analysis_result_invalid", "临时代码没有返回 JSON", code_hash)
+        _finish_failed(
+            root, analysis_id, "analysis_result_invalid", "临时代码没有返回 JSON", code_hash
+        )
         raise AnalysisWorkspaceError("analysis_result_invalid", "临时代码没有返回 JSON") from error
     result_path = workspace / "result.json"
     storage.write_atomic(result_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
@@ -330,7 +402,9 @@ def run_code(root: Path, row: dict[str, Any], analysis_id: str, code: str) -> di
             result_summary=summary,
             finished_at=storage.now_utc(),
         )
-        connection.execute("UPDATE analysis_runs SET code_hash = ? WHERE id = ?", (code_hash, analysis_id))
+        connection.execute(
+            "UPDATE analysis_runs SET code_hash = ? WHERE id = ?", (code_hash, analysis_id)
+        )
     return {
         "analysis_id": analysis_id,
         "status": "succeeded",
@@ -349,13 +423,19 @@ def _finish_failed(root: Path, analysis_id: str, status: str, summary: str, code
             result_summary=summary,
             finished_at=storage.now_utc(),
         )
-        connection.execute("UPDATE analysis_runs SET code_hash = ? WHERE id = ?", (code_hash, analysis_id))
+        connection.execute(
+            "UPDATE analysis_runs SET code_hash = ? WHERE id = ?", (code_hash, analysis_id)
+        )
 
 
 def read_result(root: Path, row: dict[str, Any], analysis_id: str) -> dict[str, Any]:
     with storage.open_db(root) as connection:
         analysis = storage.get_analysis_run(connection, analysis_id)
-    if analysis is None or analysis["session_id"] != row["id"] or analysis["ticker"] != row["ticker"]:
+    if (
+        analysis is None
+        or analysis["session_id"] != row["id"]
+        or analysis["ticker"] != row["ticker"]
+    ):
         raise AnalysisWorkspaceError("unknown_analysis_run", "分析执行不属于当前 session")
     return {
         "analysis_id": analysis_id,

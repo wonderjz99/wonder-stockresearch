@@ -76,9 +76,7 @@ def synthetic_packet_dict() -> dict[str, object]:
             "gates": gates,
             "moats": moats,
             "challenge": {
-                "counterargument": fact(
-                    "challenge", "教学中的最强相反观点。", COUNTER_SOURCE_ID
-                ),
+                "counterargument": fact("challenge", "教学中的最强相反观点。", COUNTER_SOURCE_ID),
                 "channels_checked": ["教学资料库", "虚构公告索引"],
                 "search_scope": "仅检查两份虚构材料。",
                 "refutation_found": True,

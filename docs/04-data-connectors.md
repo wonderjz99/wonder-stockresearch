@@ -33,7 +33,7 @@ research.collect()
 - `src/wonder_stockresearch/storage.py`：`SCHEMA_VERSION = 2`，新增 `run_steps` 表与 `_MIGRATIONS`（v1→v2 显式迁移），以及 `next_step_attempt`/`insert_step`/`finish_step`/`list_steps`。
 - `src/wonder_stockresearch/market.py`：`FutuQuoteProvider`，惰性 import `futu`，`SysConfig.enable_console_log(False)` 防止 SDK 日志污染 stdout，先做 2 秒 TCP 端口探测再连接，只调用 `OpenQuoteContext` 的 `get_market_snapshot`，**不导入任何账户/交易接口**。财务报表由 `futu_fundamentals.py` 的单一路径分页请求。
 - `src/wonder_stockresearch/disclosures.py`：`HkexDisclosureProvider`（`prefix.do` 查 stockId，`titleSearchServlet.do` 取公告并保留最多 200 条相关候选）、`SecDisclosureProvider`（EDGAR submissions，需 `WONDER_SEC_USER_AGENT`）、`classify_title`/`select_filings`。当前默认回看 5 年并选取最近 5 份年报 + 3 份中期/季度报告。
-- `src/wonder_stockresearch/research.py`：抽出 `_register_source`（归档+登记，`source_add` 与 `collect` 共用）；新增 `_begin_step`/`_end_step`、`_collect_market`、`_collect_filings`、`collect`；`get_status` 增加 `steps`。
+- `src/wonder_stockresearch/fixed/research.py`：抽出 `_register_source`（归档+登记，`source_add` 与 `collect` 共用）；新增 `_begin_step`/`_end_step`、`_collect_market`、`_collect_filings`、`collect`；`get_status` 增加 `steps`。
 - `src/wonder_stockresearch/cli.py`：新增 `collect RUN_ID [--kind all|market|filings]`。
 - `pyproject.toml`：新增 `futu-api==10.11.7108`。
 - `tests/test_run_steps.py`、`tests/test_collect.py`（新）。

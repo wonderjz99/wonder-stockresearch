@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import agent, progress, research, router, skill_registry, storage, symbols, writer
+from wonder_stockresearch import agent, progress, router, skill_registry, storage, symbols
+from wonder_stockresearch.fixed import research, writer
+
 from .models import InteractiveQuestion, RoutePlan, SymbolCandidate, validate_ticker
 
 
@@ -101,7 +103,9 @@ def _pending(row: dict[str, Any]) -> dict[str, Any] | None:
 
 def _confirmation(text: str) -> bool | None:
     normalized = text.strip().casefold().replace(" ", "")
-    if any(word in normalized for word in ("不要", "取消", "否", "不想", "不确认", "不开始", "不定稿")):
+    if any(
+        word in normalized for word in ("不要", "取消", "否", "不想", "不确认", "不开始", "不定稿")
+    ):
         return False
     if normalized in {
         "确认",
@@ -154,7 +158,9 @@ def _resolve_symbol(
     model: str | None,
     on_progress: progress.ProgressCallback | None,
 ) -> dict[str, Any]:
-    progress.emit(on_progress, "symbol-search", "running", f"正在搜索标的：{query}", session_id=session_id)
+    progress.emit(
+        on_progress, "symbol-search", "running", f"正在搜索标的：{query}", session_id=session_id
+    )
     result = symbols.resolve(root, query, model=model)
     candidates = result.candidates
     pending = {
@@ -165,7 +171,9 @@ def _resolve_symbol(
         "candidates": _candidate_rows(candidates),
     }
     history = _history(row)
-    history_json = _append_history(history, "system", f"标的解析：{query}，候选数 {len(candidates)}")
+    history_json = _append_history(
+        history, "system", f"标的解析：{query}，候选数 {len(candidates)}"
+    )
     _update(
         root,
         session_id,
@@ -245,7 +253,11 @@ def _selected_symbol(
             pending=pending,
             ticker=selected_ticker,
         )
-        warning = "（该候选来自模型建议，尚未由行情数据源验证。）" if candidate and not candidate.verified else ""
+        warning = (
+            "（该候选来自模型建议，尚未由行情数据源验证。）"
+            if candidate and not candidate.verified
+            else ""
+        )
         return {
             "session_id": session_id,
             "status": "awaiting_confirmation",
@@ -261,7 +273,11 @@ def _selected_symbol(
         pending=pending,
         ticker=selected_ticker,
     )
-    warning = "（该候选来自模型建议，尚未由行情数据源验证。）" if candidate and not candidate.verified else ""
+    warning = (
+        "（该候选来自模型建议，尚未由行情数据源验证。）"
+        if candidate and not candidate.verified
+        else ""
+    )
     return {
         "session_id": session_id,
         "status": "awaiting_confirmation",
@@ -322,14 +338,23 @@ def _execute_interactive(
     if not plan.ticker:
         raise ChatError("missing_ticker", "临时分析缺少股票代码", exit_code=2)
     row, loaded = _load_execution_skills(root, session_id, row, plan, on_progress=on_progress)
-    question = InteractiveQuestion(question=plan.question or "请分析这家公司", focus=plan.focus)
+    tool_names: tuple[str, ...] | None = None
+    if loaded:
+        try:
+            tool_names = skill_registry.execution_tool_ids(loaded, "interactive_research")
+        except skill_registry.SkillRegistryError as error:
+            raise ChatError(error.code, error.message, exit_code=2) from error
+    question = InteractiveQuestion(
+        question=plan.question or "请分析这家公司", focus=plan.focus, context="company_latest"
+    )
     result = agent.ask(
         root,
         plan.ticker,
         question,
         model=model,
         skill_context=skill_registry.execution_context(loaded),
-        skill_audit=skill_registry.selection_audit(loaded),
+        skill_audit=skill_registry.selection_audit(loaded) if loaded else None,
+        tool_names=tool_names,
         on_progress=on_progress,
     )
     history = _history(row)
@@ -365,35 +390,85 @@ def _execute_fixed(
         }
     row, loaded = _load_execution_skills(root, session_id, row, plan, on_progress=on_progress)
     progress.emit(on_progress, "research", "started", f"开始正式研究：{plan.ticker}", run_id=None)
-    started = research.start_run(root, plan.ticker)
-    run_id = str(started["run_id"])
-    if loaded:
+    pending = _pending(row) or {}
+    resuming = pending.get("action") == "resume_fixed_research"
+    # 兼容旧版本中 Writer 失败后遗留的“启动确认”，避免再次确认创建重复 run。
+    if pending.get("action") == "start_fixed_research" and row.get("run_id"):
+        with storage.open_db(root) as connection:
+            steps = storage.list_steps(connection, str(row["run_id"]))
+        pending = {
+            **pending,
+            "run_id": row["run_id"],
+            "stage": "write-draft"
+            if any(step["step_key"] == "write_draft" for step in steps)
+            else "collect",
+        }
+        resuming = True
+    run_id = (
+        str(pending["run_id"]) if resuming else str(research.start_run(root, plan.ticker)["run_id"])
+    )
+    if loaded and not resuming:
         research.record_skill_selection(root, run_id, skill_registry.selection_audit(loaded))
     history = _history(row)
-    history_json = _append_history(history, "system", f"已创建研究 run：{run_id}")
-    _update(root, session_id, history_json=history_json, ticker=plan.ticker, run_id=run_id)
-
-    collected, collect_issues = research.collect(root, run_id, "all", on_progress=on_progress)
-    if int(collected.get("succeeded", 0)) == 0:
-        message = "没有成功采集到资料，暂时不能生成正式报告。请检查 Futu/OpenD 或手动补充来源。"
-        _update(root, session_id, history_json=history_json, status="failed")
+    history_json = _append_history(history, "system", f"研究 run：{run_id}")
+    stage = str(pending.get("stage", "collect")) if resuming else "collect"
+    retry = {
+        "action": "resume_fixed_research",
+        "plan": plan.model_dump(mode="json"),
+        "run_id": run_id,
+        "stage": stage,
+    }
+    _update(
+        root,
+        session_id,
+        history_json=history_json,
+        ticker=plan.ticker,
+        run_id=run_id,
+        status="active",
+        pending=retry,
+    )
+    try:
+        if stage == "collect":
+            collected, _collect_issues = research.collect(
+                root, run_id, "all", on_progress=on_progress
+            )
+            if int(collected.get("succeeded", 0)) == 0:
+                raise ChatError(
+                    "collection_failed", "没有成功采集到资料，请检查 OpenD 或补充来源后重试"
+                )
+            stage = "write-draft"
+            retry["stage"] = stage
+            _update(root, session_id, history_json=history_json, pending=retry)
+        _, writer_issues = writer.write_draft(root, run_id, model=model, on_progress=on_progress)
+    except (writer.WriterError, research.ResearchError, ChatError, storage.StorageError) as error:
+        _update(root, session_id, history_json=history_json, status="failed", pending=retry)
+        progress.emit(on_progress, stage, "failed", "研究暂停，可在当前会话确认重试", run_id=run_id)
         return {
             "session_id": session_id,
             "run_id": run_id,
             "ticker": plan.ticker,
             "status": "failed",
-            "message": message,
-            "issues": _issues_payload(collect_issues),
+            "failed_step": stage,
+            "message": "研究暂停，已保留 run 和成功分组。在当前会话输入“重试”可继续。",
+            "issues": [
+                {
+                    "code": getattr(error, "code", "storage_error"),
+                    "location": stage,
+                    "message": str(error),
+                    "severity": "error",
+                }
+            ],
         }
 
-    _, writer_issues = writer.write_draft(root, run_id, model=model, on_progress=on_progress)
     progress.emit(on_progress, "validate", "running", "正在校验正式研究草稿", run_id=run_id)
     validation_issues = research.validate_run(root, run_id)
     if not validation_issues and writer_issues:
         validation_issues = writer_issues
     if validation_issues:
         _update(root, session_id, history_json=history_json, status="failed")
-        progress.emit(on_progress, "validate", "failed", "validate 未通过，不能 finish", run_id=run_id)
+        progress.emit(
+            on_progress, "validate", "failed", "validate 未通过，不能 finish", run_id=run_id
+        )
         return {
             "session_id": session_id,
             "run_id": run_id,
@@ -414,7 +489,9 @@ def _execute_fixed(
         ticker=plan.ticker,
         run_id=run_id,
     )
-    progress.emit(on_progress, "validate", "succeeded", "validate 通过，等待确认 finish", run_id=run_id)
+    progress.emit(
+        on_progress, "validate", "succeeded", "validate 通过，等待确认 finish", run_id=run_id
+    )
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -436,7 +513,27 @@ def _finish_pending(
     if not run_id:
         raise ChatError("missing_pending_run", "待定稿 session 没有 run_id", exit_code=2)
     progress.emit(on_progress, "finish", "running", "正在生成正式归档报告", run_id=run_id)
-    result = research.finish_run(root, run_id)
+    try:
+        result = research.finish_run(root, run_id)
+    except (research.ResearchError, storage.StorageError, OSError) as error:
+        issues = getattr(error, "issues", None)
+        return {
+            "session_id": session_id,
+            "run_id": run_id,
+            "status": "failed",
+            "failed_step": "finish",
+            "message": "定稿未完成。请检查具体问题；修正后在当前会话确认重试。",
+            "issues": _issues_payload(issues)
+            if issues
+            else [
+                {
+                    "code": getattr(error, "code", "artifact_write_failed"),
+                    "location": "finish",
+                    "message": str(error),
+                    "severity": "error",
+                }
+            ],
+        }
     history = _history(row)
     history_json = _append_history(history, "system", "正式报告已 finish 并冻结")
     _update(
@@ -469,7 +566,9 @@ def _continue_symbol_selection(
     pending = _pending(row) or {}
     try:
         plan = RoutePlan.model_validate(pending.get("plan") or {})
-        candidates = [SymbolCandidate.model_validate(item) for item in pending.get("candidates", [])]
+        candidates = [
+            SymbolCandidate.model_validate(item) for item in pending.get("candidates", [])
+        ]
     except Exception as error:
         raise ChatError("invalid_symbol_selection", "标的候选记录损坏", exit_code=2) from error
 
@@ -566,9 +665,17 @@ def _continue_existing(
         )
     history = _history(row)
     decision = _confirmation(text) if pending else None
+    if (
+        pending
+        and pending.get("action") in {"resume_fixed_research", "finish"}
+        and text.strip() in {"重试", "继续", "retry", "resume"}
+    ):
+        decision = True
     if pending and decision is False:
         history_json = _append_history(history, "user", text)
-        _update(root, str(row["id"]), history_json=history_json, status="active", clear_pending=True)
+        _update(
+            root, str(row["id"]), history_json=history_json, status="active", clear_pending=True
+        )
         return {
             "session_id": row["id"],
             "status": "cancelled",
@@ -579,7 +686,7 @@ def _continue_existing(
         _update(root, str(row["id"]), history_json=history_json)
         if pending.get("action") == "finish":
             return _finish_pending(root, str(row["id"]), row, on_progress=on_progress)
-        if pending.get("action") == "start_fixed_research":
+        if pending.get("action") in {"start_fixed_research", "resume_fixed_research"}:
             plan = RoutePlan.model_validate(pending["plan"])
             return _execute_fixed(
                 root,
@@ -645,7 +752,9 @@ def run_once(
             )
         pending = {"action": "start_fixed_research", "plan": plan.model_dump(mode="json")}
         history = _history(row)
-        history_json = _append_history(history, "assistant", f"路由为正式研究：{plan.ticker or '待确认公司'}")
+        history_json = _append_history(
+            history, "assistant", f"路由为正式研究：{plan.ticker or '待确认公司'}"
+        )
         _update(
             root,
             new_id,
@@ -687,9 +796,13 @@ def run_once(
 
     new_id = _new_session(root, text, plan)
     message = (
-        "我暂时不能确定你是要启动正式研究还是做临时分析。"
-        "请明确说‘写正式报告’或‘临时分析’。"
+        "我暂时不能确定你是要启动正式研究还是做临时分析。请明确说‘写正式报告’或‘临时分析’。"
         if plan.intent == "clarify"
         else "这个自然语言入口暂不支持该操作。"
     )
-    return {"session_id": new_id, "status": "waiting_user", "message": message, "plan": plan.model_dump(mode="json")}
+    return {
+        "session_id": new_id,
+        "status": "waiting_user",
+        "message": message,
+        "plan": plan.model_dump(mode="json"),
+    }

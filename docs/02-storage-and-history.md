@@ -25,10 +25,10 @@ storage.py（持久化：连接、建表、事务、写锁、文件路径）
 ## 3. 实际文件与入口
 
 - `src/wonder_stockresearch/storage.py`（新）：`initialize` 建库、`connect`/`open_db`、`project_lock` 写锁、`run_dir`/`sources_dir` 路径、`insert_run`/`update_draft`/`mark_run_completed` 等 SQL。
-- `src/wonder_stockresearch/research.py`（扩展）：纯校验之上新增服务函数，统一入口为 `watch_add`、`watch_remove`、`watch_list`、`start_run`、`save_draft`、`validate_run`、`finish_run`、`resume_run`、`get_status`、`get_history`；校验失败抛 `ResearchError`（退出码 2 表示身份/校验拒绝，1 表示 I/O 或持久化错误）。
+- `src/wonder_stockresearch/fixed/research.py`（扩展）：纯校验之上新增服务函数，统一入口为 `watch_add`、`watch_remove`、`watch_list`、`start_run`、`save_draft`、`validate_run`、`finish_run`、`resume_run`、`get_status`、`get_history`；校验失败抛 `ResearchError`（退出码 2 表示身份/校验拒绝，1 表示 I/O 或持久化错误）。
 - `src/wonder_stockresearch/cli.py`（重写）：新增 `watch`、`start`、`status`、`history`、`save-draft`、`validate`、`finish`、`resume`。
 - `src/wonder_stockresearch/models.py`（扩展）：抽出 `validate_ticker`，新增 `REPORT_KINDS`、`RUN_STATUSES`。
-- `src/wonder_stockresearch/reports.py`（扩展）：`render_company(packet, *, archived=False, run_id=None)`。
+- `src/wonder_stockresearch/fixed/reports.py`（扩展）：`render_company(packet, *, archived=False, run_id=None)`。
 - `tests/test_storage.py`（新）：8 个阶段 2 测试。
 
 四张表（`PRAGMA user_version = 1`）：

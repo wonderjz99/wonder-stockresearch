@@ -3,7 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from wonder_stockresearch import research, storage
+from wonder_stockresearch import storage
+from wonder_stockresearch.fixed import research
 
 _V1_SCHEMA = (
     """
@@ -131,6 +132,7 @@ def test_initialize_migrates_v1_database_to_run_steps(tmp_path: Path) -> None:
         stock = connection.execute("SELECT ticker FROM stocks").fetchone()
     assert version == storage.SCHEMA_VERSION
     assert "run_steps" in tables
+    assert {"traces", "trace_spans"} <= tables
     assert {"agent_sessions", "agent_events", "interactive_reports", "company_memos"} <= tables
     assert {"agent_scratchpads", "memory_entries", "analysis_runs", "source_conflicts"} <= tables
     assert "metadata_json" in _step_columns(root)

@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import research, storage, writer
+from wonder_stockresearch import storage
 from wonder_stockresearch.cli import main
+from wonder_stockresearch.fixed import research, writer
+from wonder_stockresearch.fixed.writer import WriterError
 from wonder_stockresearch.models import ResearchPacket, SourceRequest
-from wonder_stockresearch.writer import WriterError
 
 API_KEY = "test-key-123"
 
@@ -326,7 +327,9 @@ def test_write_draft_unknown_source_reference_is_saved_for_review(
     payload["answers"][0]["statements"][0]["evidence"][0]["source_id"] = (
         "99999999-9999-4999-8999-999999999999"
     )
-    monkeypatch.setattr(writer, "_request_deepseek", lambda **kwargs: fake_response(json.dumps(payload)))
+    monkeypatch.setattr(
+        writer, "_request_deepseek", lambda **kwargs: fake_response(json.dumps(payload))
+    )
 
     data, issues = writer.write_draft(root, run_id, strategy="one-shot")
 

@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from wonder_stockresearch import chat, cli, skill_registry, storage, writer
-from wonder_stockresearch.models import RoutePlan
+from wonder_stockresearch import agent, chat, cli, skill_registry, storage
+from wonder_stockresearch.fixed import writer
+from wonder_stockresearch.models import InteractiveQuestion, RoutePlan
 
 
 def make_root(tmp_path: Path) -> Path:
@@ -120,15 +121,23 @@ def test_invalid_capability_path_duplicate_and_cycle_are_disabled(tmp_path: Path
     )
     write_skill(root, "first", name="duplicate")
     write_skill(root, "second", name="duplicate")
-    write_skill(root, "cycle-a", manifest=capability_manifest("fixed_research", dependencies=["cycle-b"]))
-    write_skill(root, "cycle-b", manifest=capability_manifest("interactive_research", dependencies=["cycle-a"]))
+    write_skill(
+        root, "cycle-a", manifest=capability_manifest("fixed_research", dependencies=["cycle-b"])
+    )
+    write_skill(
+        root,
+        "cycle-b",
+        manifest=capability_manifest("interactive_research", dependencies=["cycle-a"]),
+    )
 
     catalog = skill_registry.catalog(root)
 
     assert not catalog.skills["unknown"].available
     assert any(item.code == "unknown_capability" for item in catalog.skills["unknown"].diagnostics)
     assert not catalog.skills["bad-path"].available
-    assert any(item.code == "invalid_resource_path" for item in catalog.skills["bad-path"].diagnostics)
+    assert any(
+        item.code == "invalid_resource_path" for item in catalog.skills["bad-path"].diagnostics
+    )
     assert not catalog.skills["cycle-a"].available
     assert any(item.code == "dependency_cycle" for item in catalog.skills["cycle-a"].diagnostics)
     assert any(item.code == "duplicate_skill_name" for item in catalog.diagnostics)
@@ -150,7 +159,9 @@ def test_route_plan_keeps_legacy_empty_skills_and_rejects_duplicates() -> None:
         RoutePlan.model_validate({**payload, "skill_names": ["a", "a"]})
 
 
-def test_capability_selection_is_validated_from_catalog_without_loading_body(tmp_path: Path) -> None:
+def test_capability_selection_is_validated_from_catalog_without_loading_body(
+    tmp_path: Path,
+) -> None:
     root = make_root(tmp_path)
     write_skill(
         root,
@@ -163,16 +174,129 @@ def test_capability_selection_is_validated_from_catalog_without_loading_body(tmp
         skill_registry.validate_for_capability(root, ["interactive"], "fixed_research")
 
 
-def test_cli_start_records_loaded_skill_metadata(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_skill_manifest_grants_registered_tools_to_interactive_agent(tmp_path: Path) -> None:
+    root = make_root(tmp_path)
+    write_skill(
+        root,
+        "financial-analysis",
+        manifest={
+            **capability_manifest("interactive_research", dependencies=["company-analysis-method"]),
+            "tools": ["query_archived_financials", "run_trusted_calculation"],
+        },
+    )
+    write_skill(root, "company-analysis-method")
+
+    catalog = skill_registry.catalog(root)
+    loaded = skill_registry.load_for_capability(
+        root, ["financial-analysis"], "interactive_research"
+    )
+    allowed = skill_registry.execution_tool_ids(loaded, "interactive_research")
+
+    assert catalog.skills["financial-analysis"].available is True
+    assert "run_trusted_calculation" in allowed
+    assert "list_sources" in allowed
+    assert "run_analysis_code" not in allowed
+    assert skill_registry.selection_audit(loaded)[-1]["tools"] == [
+        "query_archived_financials",
+        "run_trusted_calculation",
+    ]
+
+
+def test_agent_session_restores_skill_tool_allowlist_and_rejects_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_root(tmp_path)
+    write_skill(root, "company-analysis-method")
+    skill_dir = write_skill(
+        root,
+        "financial-analysis",
+        manifest={
+            **capability_manifest("interactive_research", dependencies=["company-analysis-method"]),
+            "tools": ["run_trusted_calculation"],
+        },
+    )
+    loaded = skill_registry.load_for_capability(
+        root, ["financial-analysis"], "interactive_research"
+    )
+    audit = skill_registry.selection_audit(loaded)
+    allowed = skill_registry.execution_tool_ids(loaded, "interactive_research")
+    monkeypatch.setattr(
+        agent,
+        "_api_call_for_root",
+        lambda root, messages, model: (
+            {
+                "type": "final",
+                "answer": "已完成临时分析。",
+                "claims": [],
+                "evidence_refs": [],
+                "counterarguments": [],
+                "gaps": [],
+                "suggested_next_checks": [],
+            },
+            12,
+        ),
+    )
+
+    result = agent.ask(
+        root,
+        "SYNTHETIC",
+        InteractiveQuestion(question="利润增长如何？"),
+        skill_context=skill_registry.execution_context(loaded),
+        skill_audit=audit,
+        tool_names=allowed,
+    )
+
+    session_context, restored_tools = agent._session_skill_context(root, str(result["session_id"]))
+    assert "company-analysis-method" in session_context
+    assert restored_tools == allowed
+    manifest_path = skill_dir / "skill.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tools"] = []
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(agent.AgentError, match="内容已在会话期间改变"):
+        agent._session_skill_context(root, str(result["session_id"]))
+
+
+@pytest.mark.parametrize(
+    ("tool_id", "diagnostic"),
+    [("made_up", "unknown_skill_tool"), ("read_source", "tool_capability_mismatch")],
+)
+def test_skill_with_unknown_or_incompatible_tool_is_disabled(
+    tmp_path: Path, tool_id: str, diagnostic: str
+) -> None:
+    root = make_root(tmp_path)
+    write_skill(
+        root,
+        "bad-tools",
+        manifest={
+            **capability_manifest("fixed_research"),
+            "tools": [tool_id],
+        },
+    )
+
+    summary = skill_registry.catalog(root).skills["bad-tools"]
+
+    assert summary.available is False
+    assert any(item.code == diagnostic for item in summary.diagnostics)
+
+
+def test_cli_start_records_loaded_skill_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = make_root(tmp_path)
     write_skill(root, "method")
-    write_skill(root, "fixed", manifest=capability_manifest("fixed_research", dependencies=["method"]))
+    write_skill(
+        root, "fixed", manifest=capability_manifest("fixed_research", dependencies=["method"])
+    )
 
     assert cli.main(["--root", str(root), "start", "SYNTHETIC", "--skill", "fixed"]) == 0
 
     result = json.loads(capsys.readouterr().out)
     run_id = result["data"]["run_id"]
-    assert [item["name"] for item in result["data"]["skill_selection"]["skills"]] == ["method", "fixed"]
+    assert [item["name"] for item in result["data"]["skill_selection"]["skills"]] == [
+        "method",
+        "fixed",
+    ]
     with storage.open_db(root) as connection:
         steps = storage.list_steps(connection, run_id)
     assert steps[-1]["step_key"] == "skill_selection"
@@ -192,6 +316,20 @@ def test_writer_recovers_selected_skill_context_and_rejects_later_changes(
     )
     assert cli.main(["--root", str(root), "start", "SYNTHETIC", "--skill", "fixed"]) == 0
     run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    # v5–v9 的固定研究 Skill 审计没有新授权字段，应继续可恢复。
+    with storage.open_db(root) as connection:
+        step = connection.execute(
+            "SELECT attempt, metadata_json FROM run_steps WHERE run_id = ? AND step_key = 'skill_selection'",
+            (run_id,),
+        ).fetchone()
+        legacy = json.loads(step["metadata_json"])
+        for item in legacy["skills"]:
+            for field in ("tools", "applies_to", "dependencies", "prompt_resources"):
+                item.pop(field, None)
+        connection.execute(
+            "UPDATE run_steps SET metadata_json = ? WHERE run_id = ? AND step_key = 'skill_selection' AND attempt = ?",
+            (json.dumps(legacy), run_id, step["attempt"]),
+        )
 
     context, audit = writer._selected_skill_context(root, run_id)
 
@@ -204,11 +342,17 @@ def test_writer_recovers_selected_skill_context_and_rejects_later_changes(
         writer._selected_skill_context(root, run_id)
 
 
-def test_chat_records_selected_skill_metadata_at_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_records_selected_skill_metadata_at_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = make_root(tmp_path)
     storage.initialize(root)
     write_skill(root, "method")
-    write_skill(root, "interactive", manifest=capability_manifest("interactive_research", dependencies=["method"]))
+    write_skill(
+        root,
+        "interactive",
+        manifest=capability_manifest("interactive_research", dependencies=["method"]),
+    )
     session_id = chat._new_session(root, "临时分析")
     row = chat._row(root, session_id)
     plan = RoutePlan(
@@ -234,6 +378,10 @@ def test_chat_records_selected_skill_metadata_at_execution(tmp_path: Path, monke
         saved = storage.get_chat_session(connection, session_id)
     assert saved is not None
     history = json.loads(saved["history_json"])
-    assert any("Skill 执行加载" in item["content"] and "interactive" in item["content"] for item in history)
+    assert any(
+        "Skill 执行加载" in item["content"] and "interactive" in item["content"] for item in history
+    )
     assert "仅在执行时可见的正文。" in str(captured["skill_context"])
     assert [item["name"] for item in captured["skill_audit"]] == ["method", "interactive"]
+    assert "list_sources" in captured["tool_names"]
+    assert "run_trusted_calculation" not in captured["tool_names"]

@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import research, storage
+from wonder_stockresearch import storage
+from wonder_stockresearch.fixed import research
+from wonder_stockresearch.fixed.research import ResearchError, validate_packet
 from wonder_stockresearch.models import ResearchPacket, Source, SourceRequest
-from wonder_stockresearch.research import ResearchError, validate_packet
 
 
 def make_root(tmp_path: Path) -> Path:
@@ -232,7 +233,9 @@ def test_undated_archived_source_blocks_finish_but_is_kept(tmp_path: Path) -> No
     data["sources"] = [json.loads(archived.model_dump_json())]
     research.save_draft(root, run_id, ResearchPacket.model_validate(data))
 
-    assert "ineligible_as_of_support" in {issue.code for issue in research.validate_run(root, run_id)}
+    assert "ineligible_as_of_support" in {
+        issue.code for issue in research.validate_run(root, run_id)
+    }
     assert (root / archived.raw_path).is_file()
     assert research.get_status(root, run_id)["source_count"] == 1
     with pytest.raises(ResearchError):

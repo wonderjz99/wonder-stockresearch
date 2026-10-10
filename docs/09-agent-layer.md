@@ -1,5 +1,9 @@
 # 阶段 8–10、18：独立交互 Agent、记忆、临时报告与受限计算
 
+2026-10-09 更新：用户已批准 Python 领域核心 + 项目自带 Pi SDK 问答运行时。Pi 路径已实现并在验收，默认切换须待质量门槛通过；安装、职责和已知限制见 [Pi 运行时](30-pi-agent-runtime.md)。本更新覆盖下文历史阶段中的“暂不引入 Pi runtime”限制。
+
+同日修复后的新问题默认预算为 60,000 tokens／10 轮，覆盖下文历史默认；旧 Turn 不变。Pi 有界上下文、查询分页、工作记录与紧凑引用说明见 [可靠性修复](32-pi-agent-reliability.md)，thinking 暂不开启。
+
 ## 1. 目标
 
 本项目有两个并行入口：
@@ -90,7 +94,9 @@ wonder-research --root <项目根> memo-list HK.00728
 wonder-research --root <项目根> memo-read <MEMO_ID>
 ```
 
-当前 `allow_network=true` 会明确返回不支持。需要联网采集时先走固定的 `collect` 或 `source-add`，之后再用 `ask` 读取归档材料。
+2026-10-08 更新：新问题默认允许按需调用 `fetch_financial_data` 补取当前公司的富途只读财务资料；`allow_network=false` 禁止补取。来源属于当前 Turn，不挂入正式 run。其他联网资料仍使用固定 `collect`/`source-add`。固定计算器不限制可回答的指标，模型可以选择 SQL 或编写受限函数。默认总预算 30,000，旧 Turn 不变。详见[通用财务问答](25-agent-context-and-financial-tools.md)。
+
+公司数据层 B：新 chat 使用 company_latest，直接 ask 可显式选择；每个 Turn 固定四类来源/解析版本，跨 Turn 复用需新建该范围并重新取得引用回执。支持基本信息与财务查询、profile 补取后索引，旧 run 范围不变。单次输入为可调整目标，Turn 总预算不变；历史版本授权不静默升级。详见 [实现、备份和真实冒烟质量限制](29-company-agent-query.md)。
 
 `focus` 可以选择 `general`、`challenge`、`macro`、`peer`、`capacity_cycle` 或 `inventory_cycle`。这些是同一个 Agent 的受控分析角色，不是相互独立的长期 Agent；它们共享相同的只读工具、证据校验和临时报告边界。
 
@@ -123,7 +129,9 @@ Agent 的普通研究工具均为只读：
 - `run_analysis_code`
 - `read_analysis_result`
 
-每个工具有 Pydantic 参数模型。前三个分析步骤先读取已归档数据或项目固定计算；需要临时代码时，只能对最小只读 JSON 副本执行受限 AST。代码不能 `import`、访问属性、读取文件、访问 SQLite、网络、环境变量、shell 或动态执行；每个 session 最多三次，子进程不继承 API Key，并受到十秒、256 MB、64 KB 输出限制。Agent 不能调用任意 Python、SQL、shell、网络或交易接口。工具结果被截断后才重新放入上下文，调用事件保存在 `agent_events`，不保存隐藏推理、完整认证头或 API Key。
+这些是直接 `ask` 和历史 session 的兼容路径。阶段 19C 的新版 `analysis-workspace` Skill 改为授权 `describe_analysis_schema`、`run_readonly_sql`、`run_analysis_function` 与 `read_analysis_artifact`（同时保留归档财务查询和可信计算）；它们由 Turn 级 QueryWorkspace 执行，详情见 [Turn 级 QueryWorkspace](21-query-workspace.md)。
+
+每个工具有 Pydantic 参数模型。旧 JSON 数据集代码只能对最小只读副本执行受限 AST；新版 SQL 只在 Turn 级 immutable 快照中执行。两条路径都不能 `import`、访问任意属性/文件、访问项目 SQLite、网络、环境变量、shell 或动态执行；Agent 不能调用任意 Python、SQL、shell、网络或交易接口。工具结果被截断后才重新放入上下文，调用事件保存在 `agent_events`，不保存隐藏推理、完整认证头或 API Key。
 
 Agent 使用有限 JSON 协议：
 
@@ -187,8 +195,21 @@ Scratchpad 自动记录可检查的工作状态，不保存提示全文或隐藏
 
 当前只有一个完整交互 Agent。自然语言 Router 是一次结构化分类调用，正式报告 Writer 是一次结构化写作调用，都不是独立的多轮 Agent。
 
-## 8. 后续扩展
+## 8. 实现组织
 
-反方可以继续作为当前 Agent 的开放问题；宏观、同行、产能和库存周期专用 Agent 本阶段暂不新增。下一项专业能力优先考虑同行业竞争 Agent，但需要用户先明确研究方法、比较对象和数据范围。阶段 19 先接入新数据源并评估局部 OCR；阶段 20 才用同一批开放问题比较 Python loop、Pi Agent Core 和最多三名受控 worker。只有真实运行证明需要独立上下文、并行执行或独立质量评估时，才拆分子 Agent。
+交互 Agent 按职责拆分为小模块：`agent.py` 保留公开入口与授权快照；`agent_session.py` 管理生命周期和事务；`agent_execution.py` 提供共用预算、工具执行与答案接收；旧 JSON 循环放在 `legacy_agent.py`，Pi 事件适配放在 `pi_agent.py` / `pi_attempt.py`。`agent_policy.py` 动态构造 system prompt；`tool_contracts.py` / `tool_registry.py` 绑定参数与普通 handler；`agent_results.py` 统一内部结果和有界投影；`agent_memory.py` 管 Scratchpad/可信记忆，`agent_errors.py` 统一受控错误。2026-10-10 已完成的边界整理见 [执行架构说明](35-agent-execution-architecture.md)。
+
+system prompt 不是独立静态 Markdown：Tool schema 与 Skill 方法正文必须按本轮授权动态组装。不可变限制（不修改正式研究、不可 finish、不可编造引用、JSON 决策协议）放在 Skill 之前；Skill 只能补充分析方法，不能授予权限。实际安全控制仍在 Tool Registry、handler 和最终引用校验中。详见 [交互 Agent 的内部组织](20-agent-runtime-organization.md)。
+
+## 9. 后续扩展
+
+反方可以继续作为当前 Agent 的开放问题；宏观、同行、产能和库存周期专用 Agent 本阶段暂不新增。阶段 19C 已把既有 `AnalysisWorkspace` 的新版 Skill 路径演进为 QueryWorkspace：每次 `ask`/`ask-followup` 都创建最小的 `AgentTurn`，使快照、SQL/函数、工具证据和配额归属一个用户问题，而不是整段 session。可信计算优先；不足时才在当前 session/turn/ticker/run 的隔离只读财务事实快照上执行受限 SQL，最后才对 SQL 结果调用受限 `analyze(rows)` 函数。它不读取来源全文、不直接查询项目主库、不改固定研究，并以实际工具回执而非模型声明验证最终引用。SQL/函数失败会作为可恢复工具错误返回模型。细节见 [Turn 级 QueryWorkspace](21-query-workspace.md)。
+
+阶段 19D 随后补齐最小运行时语义：为 Turn 加入 Attempt、合法状态迁移、非覆盖式临时报告、带目标 Turn ID 的等待用户恢复/失败重试，并把事件和 trace 关联到实际执行；重试不会恢复 Python 调用栈或刷新 Turn 预算。复用已有 Tool Registry 与 Scratchpad，不复制 Dayu 的完整 Host/EventLog/队列。19D 的后半还会增加离线演示、英文 Quick Start、CI 与面试案例。阶段 19E 才在这些稳定边界上建立开放问题 Agent 的跨场景评测基线；19C/19D 的安全和 fake-model 验收测试不延后，也不单列记忆专项评测。Pi Agent Core 仍只在阶段 21 的公开基准证明需要上下文、steering、流式事件或多模型运行时收益时评估。
 
 LangGraph 不是当前依赖。只有多轮恢复、跨天状态、并行任务或审计复杂度超过现有 Python 循环时才评估；即使引入，也只能调用现有 Python 服务，不能直接改评分或执行 `finish`。
+
+
+2026-10-07 更新：19D.1 最小运行时与可靠性收口已实现，包含同 Turn respond/retry、不可变报告、事务、预算预留、执行锁和遗留中断结算。详见 [执行与恢复](23-agent-runtime-reliability.md)。19D.2 仍待实施，GitHub Actions 按最新用户要求暂缓；上文阶段路线保留为设计背景。
+
+2026-10-08：用户明确要求参考 Pi 核心设计，本次在现有 Python 循环内落实 `transform_context/convert_to_llm` 和工具完整结果/模型投影边界，没有引入 Pi runtime。阶段 21 的门槛仍用于是否迁移框架，不妨碍借鉴设计。

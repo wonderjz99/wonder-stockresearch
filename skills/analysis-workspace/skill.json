@@ -1,9 +1,26 @@
 {
   "schema_version": 1,
   "kind": "capability",
-  "version": "1",
-  "applies_to": ["analysis_workspace"],
-  "dependencies": ["company-analysis-method"],
-  "capabilities": ["analysis_workspace"],
+  "version": "5",
+  "applies_to": [
+    "interactive_research"
+  ],
+  "dependencies": [
+    "company-analysis-method"
+  ],
+  "capabilities": [
+    "interactive_research",
+    "analysis_workspace"
+  ],
+  "tools": [
+    "query_company_data",
+    "query_archived_financials",
+    "fetch_financial_data",
+    "run_trusted_calculation",
+    "describe_analysis_schema",
+    "run_readonly_sql",
+    "run_analysis_function",
+    "read_analysis_artifact"
+  ],
   "prompt_resources": []
 }

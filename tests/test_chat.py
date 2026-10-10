@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from wonder_stockresearch import chat, cli, progress, research, router, storage, symbols
+from wonder_stockresearch import chat, cli, progress, router, storage, symbols
+from wonder_stockresearch.fixed import research
 from wonder_stockresearch.models import RoutePlan, SymbolCandidate
 
 
@@ -46,7 +47,7 @@ def test_router_validates_structured_deepseek_route(tmp_path: Path, monkeypatch)
         ]
     }
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.setattr(router.writer, "_request_deepseek", lambda **kwargs: payload)
+    monkeypatch.setattr(router.model_request, "request_deepseek", lambda **kwargs: payload)
 
     plan = router.route(root, "帮我弄一份中国移动报告")
 
@@ -79,7 +80,7 @@ def test_router_treats_null_focus_as_general(tmp_path: Path, monkeypatch) -> Non
         ]
     }
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.setattr(router.writer, "_request_deepseek", lambda **kwargs: payload)
+    monkeypatch.setattr(router.model_request, "request_deepseek", lambda **kwargs: payload)
 
     plan = router.route(root, "帮我研究一下中国联通")
 
@@ -87,9 +88,7 @@ def test_router_treats_null_focus_as_general(tmp_path: Path, monkeypatch) -> Non
     assert plan.focus == "general"
 
 
-def test_chat_requires_confirmation_then_runs_to_validate(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_chat_requires_confirmation_then_runs_to_validate(tmp_path: Path, monkeypatch) -> None:
     root = make_root(tmp_path)
     plan = RoutePlan(
         intent="fixed_research",
@@ -281,7 +280,9 @@ def test_ambiguous_symbol_requires_selection_before_formal_confirmation(
         lambda *args, **kwargs: symbols.ResolutionResult([candidate]),
     )
     collect_called: list[str] = []
-    monkeypatch.setattr(chat.research, "collect", lambda *args, **kwargs: collect_called.append("called"))
+    monkeypatch.setattr(
+        chat.research, "collect", lambda *args, **kwargs: collect_called.append("called")
+    )
 
     first = chat.run_once(root, "帮我研究一下保利")
     assert first["status"] == "awaiting_symbol_selection"
@@ -314,7 +315,7 @@ def test_router_repairs_one_invalid_protocol_response(tmp_path: Path, monkeypatc
         ]
     )
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.setattr(router.writer, "_request_deepseek", lambda **kwargs: next(responses))
+    monkeypatch.setattr(router.model_request, "request_deepseek", lambda **kwargs: next(responses))
 
     plan = router.route(root, "帮我研究一下中国电信")
 
@@ -346,7 +347,7 @@ def test_router_treats_fixed_research_phrase_as_formal_intent(tmp_path: Path, mo
         ]
     }
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.setattr(router.writer, "_request_deepseek", lambda **kwargs: payload)
+    monkeypatch.setattr(router.model_request, "request_deepseek", lambda **kwargs: payload)
 
     plan = router.route(root, "帮我研究一下保利")
 
@@ -367,12 +368,13 @@ def test_chat_text_only_continues_for_interactive_results() -> None:
     assert cli._chat_needs_followup({"status": "awaiting_confirmation"}) is True
     assert cli._chat_needs_followup({"status": "awaiting_finish"}) is True
     assert cli._chat_needs_followup({"status": "waiting_user"}) is True
-    assert cli._chat_needs_followup(
-        {"status": "completed", "result": {"report": {"answer": "临时分析"}}}
-    ) is True
-    assert cli._chat_needs_followup(
-        {"status": "completed", "result": {"run_id": "run-1"}}
-    ) is False
+    assert (
+        cli._chat_needs_followup(
+            {"status": "completed", "result": {"report": {"answer": "临时分析"}}}
+        )
+        is True
+    )
+    assert cli._chat_needs_followup({"status": "completed", "result": {"run_id": "run-1"}}) is False
 
 
 def test_chat_text_reuses_session_in_a_terminal(tmp_path: Path, monkeypatch) -> None:
@@ -473,13 +475,16 @@ def test_chat_finish_uses_human_summary_in_a_terminal(tmp_path: Path, monkeypatc
 
     assert "正式报告已完成并冻结" in terminal.value
     assert "质量：完整" in terminal.value
-    assert "护城河总分：23 / 60" in terminal.value
+    assert "护城河严格证据总分：23 / 60" in terminal.value
+    assert "护城河可用暂定总分：23 / 60" in terminal.value
     assert str((run_dir / "company.md").resolve()) in terminal.value
     assert "chat-session-1" not in terminal.value
     assert '"run_id"' not in terminal.value
 
 
-def test_chat_text_finish_uses_summary_in_tty_without_session_json(tmp_path: Path, monkeypatch) -> None:
+def test_chat_text_finish_uses_summary_in_tty_without_session_json(
+    tmp_path: Path, monkeypatch
+) -> None:
     root = make_root(tmp_path)
     run_dir = root / "data" / "stocks" / "SYNTHETIC" / "runs" / "sample"
     run_dir.mkdir(parents=True)
@@ -516,8 +521,95 @@ def test_chat_text_finish_uses_summary_in_tty_without_session_json(tmp_path: Pat
     terminal = TerminalOutput()
     monkeypatch.setattr(cli.sys, "stdout", terminal)
 
-    assert cli.main(["--root", str(root), "chat", "--text", "确认定稿", "--session-id", "chat-session-2"]) == 0
+    assert (
+        cli.main(
+            ["--root", str(root), "chat", "--text", "确认定稿", "--session-id", "chat-session-2"]
+        )
+        == 0
+    )
 
     assert "正式报告已完成并冻结" in terminal.value
     assert "chat-session-2" not in terminal.value
     assert '"ok"' not in terminal.value
+
+
+def test_writer_failure_can_resume_same_chat_run_without_recollect(tmp_path, monkeypatch):
+    from wonder_stockresearch.fixed import writer
+
+    root = make_root(tmp_path)
+    plan = RoutePlan(intent="fixed_research", ticker="SYNTHETIC", confidence=1, reason="test")
+    monkeypatch.setattr(router, "route", lambda *a, **kw: plan)
+    collected = []
+    monkeypatch.setattr(
+        research,
+        "collect",
+        lambda root, run_id, *a, **kw: (collected.append(run_id) or {"succeeded": 1}, []),
+    )
+
+    def fail(*a, **kw):
+        raise writer.WriterError("invalid_section_shape", "shape mismatch")
+
+    monkeypatch.setattr(writer, "write_draft", fail)
+    first = chat.run_once(root, "研究教学公司")
+    failed = chat.run_once(root, "确认", session_id=first["session_id"])
+    assert failed["status"] == "failed"
+    assert failed["failed_step"] == "write-draft"
+    assert failed["issues"][0]["code"] == "invalid_section_shape"
+    monkeypatch.setattr(writer, "write_draft", lambda *a, **kw: ({}, []))
+    monkeypatch.setattr(research, "validate_run", lambda *a, **kw: [])
+    result = chat.run_once(root, "重试", session_id=first["session_id"])
+    assert result["status"] == "awaiting_finish"
+    assert result["run_id"] == failed["run_id"]
+    assert collected == [failed["run_id"]]
+    with storage.open_db(root) as c:
+        assert len(storage.list_runs(c, "SYNTHETIC")) == 1
+
+
+def test_finish_failure_preserves_session_and_diagnostics(tmp_path, monkeypatch):
+    root = make_root(tmp_path)
+    session_id = chat._new_session(root, "test")
+    run_id = research.start_run(root, "SYNTHETIC")["run_id"]
+    chat._update(
+        root,
+        session_id,
+        history_json="[]",
+        status="awaiting_finish",
+        pending={"action": "finish", "run_id": run_id},
+        run_id=run_id,
+    )
+
+    def fail(*a, **kw):
+        raise research.ResearchError("semantic_review_stale", "草稿已变化", exit_code=2)
+
+    monkeypatch.setattr(research, "finish_run", fail)
+    result = chat.run_once(root, "确认定稿", session_id=session_id)
+    assert result["status"] == "failed"
+    assert result["failed_step"] == "finish"
+    assert result["run_id"] == run_id
+    assert result["issues"][0]["code"] == "semantic_review_stale"
+    assert chat._pending(chat._row(root, session_id))["action"] == "finish"
+
+
+def test_failed_chat_json_returns_nonzero_with_run_id(tmp_path, monkeypatch, capsys):
+    root = make_root(tmp_path)
+    monkeypatch.setattr(
+        chat,
+        "run_once",
+        lambda *a, **kw: {
+            "status": "failed",
+            "run_id": "test-run",
+            "session_id": "test-session",
+            "issues": [
+                {
+                    "code": "invalid_json",
+                    "location": "write-draft",
+                    "message": "invalid",
+                    "severity": "error",
+                }
+            ],
+        },
+    )
+    assert cli.main(["--root", str(root), "chat", "--text", "研究公司"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["data"]["run_id"] == "test-run"

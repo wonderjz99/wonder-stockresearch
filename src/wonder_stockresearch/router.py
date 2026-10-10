@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import get_args
 
 from pydantic import ValidationError
 
-from . import envfile, progress, skill_registry, storage, writer
+from . import envfile, model_request, observability, progress, skill_registry, storage
 from .models import RoutePlan
 
 
@@ -25,7 +26,7 @@ _FIXED_RESEARCH_RE = re.compile(
     r"研究(?:一下|一份|公司)?|写(?:一份|一下)?报告|生成(?:一份|公司)?报告|"
     r"公司研究|标准研究|正式报告|全面研究"
 )
-ROUTER_PROMPT_VERSION = "natural-router-v2"
+ROUTER_PROMPT_VERSION = "natural-router-v3"
 
 
 def _system_prompt(root: Path) -> str:
@@ -42,6 +43,11 @@ def _system_prompt(root: Path) -> str:
         "输出必须是单个 JSON 对象，字段只能是：intent、company_name、ticker、question、focus、"
         "confidence、reason、requires_confirmation、skill_names。skill_names 只列与该请求直接相关且 available=true 的名称；"
         "没有合适 Skill 时返回空数组。\n"
+        f"允许的 intent：{json.dumps(get_args(RoutePlan.model_fields['intent'].annotation))}；"
+        f"允许的 focus：{json.dumps(get_args(RoutePlan.model_fields['focus'].annotation))}。"
+        "confidence 必须为 0 到 1 的数字；reason 是非空字符串；"
+        "requires_confirmation 是布尔值；question/company_name/ticker 是字符串或 null；"
+        "skill_names 是字符串数组，不输出分析或其他字段。\n"
         f"当前可用 Skill 摘要：\n{skill_registry.catalog_prompt(root)}"
     )
 
@@ -75,7 +81,9 @@ def _parse_plan(content: str) -> RoutePlan:
         payload = json.loads(content)
         plan = RoutePlan.model_validate(payload)
     except json.JSONDecodeError as error:
-        raise RouterError("invalid_route", f"DeepSeek 路由结果不是合法 JSON：{error.msg}", exit_code=1) from error
+        raise RouterError(
+            "invalid_route", f"DeepSeek 路由结果不是合法 JSON：{error.msg}", exit_code=1
+        ) from error
     except ValidationError as error:
         details = "；".join(
             f"{'.'.join(str(part) for part in item.get('loc', ()))}：{item.get('msg', '')}"
@@ -107,8 +115,9 @@ def _repair_plan(
         "允许的 intent：fixed_research、interactive_question、memo_save、session_followup、"
         f"status_query、clarify、unsupported。\n项目 Skill 摘要：\n{skill_registry.catalog_prompt(root)}"
     )
-    response = writer._request_deepseek(
-        api_key=writer._api_key(),
+    response = model_request.traced_request(
+        root,
+        api_key=model_request.api_key(),
         model=model,
         messages=[
             {"role": "system", "content": repair_prompt},
@@ -119,11 +128,12 @@ def _repair_plan(
         ],
         temperature=0.0,
         thinking="disabled",
+        kind="router_repair",
     )
-    return _parse_plan(writer._extract_content(response))
+    return _parse_plan(model_request.extract_content(response))
 
 
-def route(
+def _route(
     root: Path,
     text: str,
     *,
@@ -135,11 +145,12 @@ def route(
     if not text.strip():
         raise RouterError("empty_input", "自然语言输入不能为空", exit_code=2)
     envfile.load_env_file(root / ".env")
-    resolved_model = writer._resolved_model(model)
+    resolved_model = model_request.resolved_model(model)
     progress.emit(on_progress, "route", "running", "正在理解自然语言请求")
     try:
-        response = writer._request_deepseek(
-            api_key=writer._api_key(),
+        response = model_request.traced_request(
+            root,
+            api_key=model_request.api_key(),
             model=resolved_model,
             messages=[
                 {"role": "system", "content": _system_prompt(root)},
@@ -147,21 +158,22 @@ def route(
             ],
             temperature=0.0,
             thinking="disabled",
+            kind="router",
         )
-        content = writer._extract_content(response)
+        content = model_request.extract_content(response)
         try:
             plan = _parse_plan(content)
         except RouterError as first_error:
             progress.emit(on_progress, "route", "retrying", "路由 JSON 不符合协议，尝试修复一次")
             try:
                 plan = _repair_plan(root, text.strip(), content, first_error, model=resolved_model)
-            except (RouterError, writer.WriterError) as repair_error:
+            except (RouterError, model_request.ModelRequestError) as repair_error:
                 raise RouterError(
                     "route_protocol_error",
                     f"DeepSeek 路由协议修复失败：{repair_error.message}",
                     exit_code=1,
                 ) from repair_error
-    except writer.WriterError as error:
+    except model_request.ModelRequestError as error:
         raise RouterError(error.code, error.message, exit_code=error.exit_code) from error
     if plan.intent == "clarify" and _looks_like_fixed_research(text):
         plan = plan.model_copy(
@@ -195,3 +207,20 @@ def route(
         f"已识别请求类型：{plan.intent}",
     )
     return plan
+
+
+def route(
+    root: Path,
+    text: str,
+    *,
+    model: str | None = None,
+    on_progress: progress.ProgressCallback | None = None,
+) -> RoutePlan:
+    """路由一次自然语言输入，并记录不含输入正文的独立 trace。"""
+    with observability.operation(
+        root,
+        "router.route",
+        trace_kind="router",
+        attributes={"model": model or model_request.DEFAULT_MODEL, "input_chars": len(text)},
+    ):
+        return _route(root, text, model=model, on_progress=on_progress)

@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import envfile, research, writer
+from wonder_stockresearch import envfile
+from wonder_stockresearch.fixed import research, writer
 from wonder_stockresearch.models import ResearchPacket
 
 
@@ -28,7 +29,9 @@ def packet_for(ticker: str = "SYNTHETIC") -> ResearchPacket:
     return ResearchPacket.model_validate(data)
 
 
-def test_load_env_file_parses_and_does_not_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_env_file_parses_and_does_not_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Overriding shell variables or mis-parsing quotes/comments must fail this test."""
     keys = ("WONDER_TEST_ENV_A", "WONDER_TEST_ENV_B", "WONDER_TEST_ENV_C")
     for key in keys:
@@ -89,6 +92,9 @@ def test_writer_reads_root_dotenv_without_leaking(
 def test_dotenv_is_gitignored() -> None:
     """Committing the local .env must fail this test."""
     project_root = Path(__file__).resolve().parents[1]
-    lines = {line.strip() for line in (project_root / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    lines = {
+        line.strip()
+        for line in (project_root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    }
     assert ".env" in lines
     assert (project_root / ".env.example").is_file()

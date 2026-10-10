@@ -44,7 +44,7 @@
 
 `collect`、`write-draft`、`ask` 和 `chat` 的长任务进度只写 stderr；stdout 保留最终 JSON。不得打印模型隐藏推理、密钥、完整原文或完整工具结果。
 
-当前只有一个完整交互 Agent；自然语言 Router 是一次受控分类组件，正式报告 Writer 是一次受控写作组件。不要因为增加 `chat` 就引入多 Agent、TypeScript runtime 或 LangGraph。
+当前只有一个完整交互 Agent；自然语言 Router 是一次受控分类组件，正式报告 Writer 是一次受控写作组件。2026-10-09 用户明确确认 Python 研究核心 + 项目内 Node/Pi runtime，完整迁移开放问答，覆盖原“不引入 TypeScript runtime”的限制。使用锁定的 pi-ai/pi-agent-core，Python 继续权威管理授权、证据、预算、Session/Turn/Attempt 和持久化；不引入多 Agent 或 LangGraph。具体范围与真实验证额度见 PLAN 的 Pi SDK 迁移阶段。
 
 固定研究报告、交互临时报告、公司 Memo 是三种不同产物。交互 Agent 不得自动修改 `ResearchRun`、评分、门闸或执行 `finish`；只有用户明确调用 `memo-save` 才能保存 Memo。
 

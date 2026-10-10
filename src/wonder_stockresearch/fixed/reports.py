@@ -5,9 +5,15 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from .models import DraftReview, EvidenceRef, ResearchPacket, Statement, source_id_text
-from .questions import QUESTION_TEXT
-from .research import derive_quality_status, derive_score_total
+from wonder_stockresearch.fixed.questions import QUESTION_TEXT
+from wonder_stockresearch.fixed.research import derive_quality_status, derive_score_summary
+from wonder_stockresearch.models import (
+    DraftReview,
+    EvidenceRef,
+    ResearchPacket,
+    Statement,
+    source_id_text,
+)
 
 _ANSWER_STATUS = {"answered": "已回答", "partial": "部分回答", "missing": "缺少资料"}
 _STATEMENT_KIND = {"fact": "事实", "inference": "推断", "assumption": "假设"}
@@ -45,10 +51,14 @@ def _reference_text(reference: EvidenceRef, aliases: dict[str, str]) -> str:
     return f"[{alias}] {relation}，{reference.locator}"
 
 
-def _references_line(label: str, references: list[EvidenceRef], aliases: dict[str, str]) -> list[str]:
+def _references_line(
+    label: str, references: list[EvidenceRef], aliases: dict[str, str]
+) -> list[str]:
     if not references:
         return []
-    rendered = "；".join(_reference_text(reference, aliases) for reference in _unique_references(references))
+    rendered = "；".join(
+        _reference_text(reference, aliases) for reference in _unique_references(references)
+    )
     return [f"  - {label}：{rendered}"]
 
 
@@ -99,7 +109,11 @@ def _gap_lines(gap: object) -> list[str]:
 
 
 def render_company(
-    packet: ResearchPacket, *, archived: bool = False, preview: bool = False, run_id: str | None = None
+    packet: ResearchPacket,
+    *,
+    archived: bool = False,
+    preview: bool = False,
+    run_id: str | None = None,
 ) -> str:
     """把已解析包变为固定结构 Markdown；调用方负责先校验。
 
@@ -107,8 +121,20 @@ def render_company(
     """
     draft = packet.draft
     aliases = _source_aliases(packet)
-    total = derive_score_total(draft)
+    score_summary = derive_score_summary(draft)
+    total = score_summary["score_total"]
     total_text = str(total) if total is not None else "未评估（至少一项护城河评分为 null）"
+    provisional = score_summary["provisional_score_total"]
+    coverage = f"{score_summary['scored_dimension_count']}/6"
+    uncertainty = score_summary["uncertainty_range"]
+    missing = score_summary["missing_dimensions"]
+    provisional_note = (
+        f"{provisional}（暂定；证据覆盖 {coverage}；"
+        f"未评估维度 {', '.join(missing)} 各按 {score_summary['provisional_prior_per_missing_dimension']} 分计入；"
+        f"不确定区间 {uncertainty['min']}–{uncertainty['max']}）"
+        if missing
+        else f"{provisional}（六项均有证据评分）"
+    )
     quality = "完整" if derive_quality_status(draft) == "complete" else "证据不完整"
     if archived:
         status_line = f"> 状态：正式归档（run {run_id}）。完成仅表示通过结构与来源检查，不代表投资判断已证实。"
@@ -118,7 +144,9 @@ def render_company(
             "不构成正式归档或投资判断。"
         )
     else:
-        status_line = "> 状态：离线样例/未正式归档。本报告只验证结构与引用关系，不代表投资判断已证实。"
+        status_line = (
+            "> 状态：离线样例/未正式归档。本报告只验证结构与引用关系，不代表投资判断已证实。"
+        )
     lines = [
         "# 公司研究 — Standard 公司部分",
         "",
@@ -128,14 +156,17 @@ def render_company(
         f"- 研究截止时点：{draft.as_of.isoformat()}",
         f"- 质量状态：{quality}",
         "- 护城河总分范围：0–60",
-        f"- 总分：{total_text}",
+        f"- 严格证据总分：{total_text}",
+        f"- 可用暂定总分：{provisional_note}",
         "",
         "## 公司问题 Q01–Q24",
         "",
     ]
     for answer in draft.answers:
         question = QUESTION_TEXT.get(answer.question_id, "")
-        heading = f"## {answer.question_id} — {question}" if question else f"## {answer.question_id}"
+        heading = (
+            f"## {answer.question_id} — {question}" if question else f"## {answer.question_id}"
+        )
         lines.extend([heading, "", f"- 状态：{_ANSWER_STATUS.get(answer.status, answer.status)}"])
         for statement in answer.statements:
             lines.extend(_statement_lines(statement, aliases))
@@ -144,7 +175,9 @@ def render_company(
 
     lines.extend(["## 公司门闸", ""])
     for gate in draft.gates:
-        lines.extend(["## " + gate.gate_id, "", f"- 结果：{_GATE_RESULT.get(gate.result, gate.result)}"])
+        lines.extend(
+            ["## " + gate.gate_id, "", f"- 结果：{_GATE_RESULT.get(gate.result, gate.result)}"]
+        )
         lines.extend(_statement_lines(gate.rationale, aliases))
         lines.extend(_gap_lines(gate.gap))
         lines.append("")
@@ -186,14 +219,18 @@ def render_company(
         lines.append("- 未记录来源冲突。")
     lines.extend(["", "## 公司结论", ""])
     lines.extend(_statement_lines(draft.conclusion, aliases))
-    lines.extend(["", "## 估值", "", "估值部分尚未实现；Q25–Q28 与 G4 不在本报告内。", "", "## 来源索引", ""])
+    lines.extend(
+        ["", "## 估值", "", "估值部分尚未实现；Q25–Q28 与 G4 不在本报告内。", "", "## 来源索引", ""]
+    )
     source_by_id = {source_id_text(source.id): source for source in packet.sources}
     for source_id in sorted(source_by_id):
         source = source_by_id[source_id]
         published_at = source.published_at.isoformat() if source.published_at else "未知"
         origin = source.url or source.endpoint or source.origin_file_label or "未提供"
         retrieved_at = source.retrieved_at.isoformat()
-        extraction = "可读取" if source.extraction_status == "available" else source.extraction_status
+        extraction = (
+            "可读取" if source.extraction_status == "available" else source.extraction_status
+        )
         alias = aliases[source_id]
         lines.append(
             f"- [{alias}] `{source_id}`：{source.title}（{_SOURCE_KIND.get(source.kind, source.kind)}；"
@@ -280,7 +317,9 @@ def render_review(comparison: dict[str, Any]) -> str:
     lines.extend(["", "## 公司门闸变化", ""])
     for gate in comparison["gates"]:
         mark = "（变化）" if gate["changed"] else ""
-        lines.append(f"- {gate['gate_id']}：{gate['baseline_result']} → {gate['current_result']}{mark}")
+        lines.append(
+            f"- {gate['gate_id']}：{gate['baseline_result']} → {gate['current_result']}{mark}"
+        )
     lines.extend(["", "## 护城河评分变化", ""])
     for moat in comparison["moats"]:
         lines.append(
@@ -309,7 +348,9 @@ def render_review(comparison: dict[str, Any]) -> str:
     lines.extend(["## 变化解释", ""])
     if comparison["review_explanations"]:
         for explanation in comparison["review_explanations"]:
-            lines.append(f"- {explanation['target_id']}（{explanation['kind']}）：{explanation['text']}")
+            lines.append(
+                f"- {explanation['target_id']}（{explanation['kind']}）：{explanation['text']}"
+            )
     else:
         lines.append("- 本次草稿未提供 review_explanations；程序只列出结构差异。")
     lines.extend(

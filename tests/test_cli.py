@@ -10,7 +10,9 @@ from wonder_stockresearch.cli import main
 def write_root_and_packet(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "project"
     root.mkdir()
-    (root / "pyproject.toml").write_text("[project]\nname = 'test-project'\nversion = '0'\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'test-project'\nversion = '0'\n", encoding="utf-8"
+    )
     packet_path = tmp_path / "packet.json"
     packet_path.write_text(json.dumps(copy_synthetic_packet()), encoding="utf-8")
     return root, packet_path

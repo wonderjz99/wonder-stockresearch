@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -15,8 +16,17 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from . import disclosures, futu_fundamentals, market, progress, source_policy, sources, storage
-from .models import (
+from wonder_stockresearch import (
+    company_data,
+    disclosures,
+    futu_fundamentals,
+    market,
+    progress,
+    source_policy,
+    sources,
+    storage,
+)
+from wonder_stockresearch.models import (
     GATE_IDS,
     MOAT_IDS,
     QUESTION_IDS,
@@ -54,6 +64,30 @@ def derive_score_total(draft: ResearchDraft) -> int | None:
     if any(score is None for score in scores):
         return None
     return sum(score for score in scores if score is not None)
+
+
+# null 仍然表示“未评估”。这个默认值只用于派生的暂定总分，既不写回单项评分，
+# 也不改变质量状态。选择 3 而不是中点 5，是因为 5 在本项目锚点中已经表示
+# “可见但有条件的优势”，证据缺失本身不能获得这一判断。
+PROVISIONAL_MOAT_PRIOR = 3
+
+
+def derive_score_summary(draft: ResearchDraft) -> dict[str, object]:
+    """同时给出严格证据总分和带透明不确定性惩罚的暂定总分。"""
+    known = [moat.score for moat in draft.moats if moat.score is not None]
+    missing = [moat.dimension_id for moat in draft.moats if moat.score is None]
+    known_total = sum(known)
+    return {
+        "score_total": derive_score_total(draft),
+        "provisional_score_total": known_total + PROVISIONAL_MOAT_PRIOR * len(missing),
+        "provisional_prior_per_missing_dimension": PROVISIONAL_MOAT_PRIOR,
+        "scored_dimension_count": len(known),
+        "missing_dimensions": missing,
+        "uncertainty_range": {
+            "min": known_total,
+            "max": known_total + 10 * len(missing),
+        },
+    }
 
 
 def derive_quality_status(draft: ResearchDraft) -> str:
@@ -208,15 +242,23 @@ def validate_packet(packet: ResearchPacket) -> list[ValidationIssue]:
     """校验一个离线包的覆盖、引用和时间边界，不访问文件系统或网络。"""
     draft = packet.draft
     issues: list[ValidationIssue] = []
-    issues.extend(_coverage_issues((item.question_id for item in draft.answers), QUESTION_IDS, "draft.answers"))
+    issues.extend(
+        _coverage_issues(
+            (item.question_id for item in draft.answers), QUESTION_IDS, "draft.answers"
+        )
+    )
     issues.extend(_coverage_issues((item.gate_id for item in draft.gates), GATE_IDS, "draft.gates"))
-    issues.extend(_coverage_issues((item.dimension_id for item in draft.moats), MOAT_IDS, "draft.moats"))
+    issues.extend(
+        _coverage_issues((item.dimension_id for item in draft.moats), MOAT_IDS, "draft.moats")
+    )
 
     source_ids = [source_id_text(source.id) for source in packet.sources]
     duplicate_sources = sorted(value for value, count in Counter(source_ids).items() if count > 1)
     if duplicate_sources:
         issues.append(
-            ValidationIssue("duplicate_source", "sources", f"重复 source_id：{', '.join(duplicate_sources)}")
+            ValidationIssue(
+                "duplicate_source", "sources", f"重复 source_id：{', '.join(duplicate_sources)}"
+            )
         )
     sources = {source_id_text(source.id): source for source in packet.sources}
     for index, source in enumerate(packet.sources):
@@ -272,7 +314,9 @@ def validate_packet(packet: ResearchPacket) -> list[ValidationIssue]:
             if issue is not None:
                 issues.append(issue)
 
-    _append_unknown_source_issues(issues, draft.challenge.counterargument, "draft.challenge.counterargument", sources)
+    _append_unknown_source_issues(
+        issues, draft.challenge.counterargument, "draft.challenge.counterargument", sources
+    )
     _append_unknown_source_issues(issues, draft.conclusion, "draft.conclusion", sources)
     for conflict_index, conflict in enumerate(draft.conflicts):
         for source_index, source_id in enumerate(conflict.source_ids):
@@ -353,11 +397,15 @@ def _archive_issues(root: Path, packet: ResearchPacket) -> list[ValidationIssue]
         path = root / source.raw_path
         if not path.is_file():
             issues.append(
-                ValidationIssue("missing_archived_file", location, f"归档原文不存在：{source.raw_path}")
+                ValidationIssue(
+                    "missing_archived_file", location, f"归档原文不存在：{source.raw_path}"
+                )
             )
         elif storage.sha256_file(path) != source.sha256:
             issues.append(
-                ValidationIssue("source_hash_mismatch", location, f"归档原文哈希不符：{source.raw_path}")
+                ValidationIssue(
+                    "source_hash_mismatch", location, f"归档原文哈希不符：{source.raw_path}"
+                )
             )
     return issues
 
@@ -378,7 +426,7 @@ def _source_row(source: Source) -> dict[str, object]:
 
 def _derived_values(draft: ResearchDraft) -> dict[str, object]:
     return {
-        "score_total": derive_score_total(draft),
+        **derive_score_summary(draft),
         "quality_status": derive_quality_status(draft),
     }
 
@@ -423,7 +471,9 @@ def start_run(
         if baseline_run_id is not None:
             baseline = _require_run(connection, baseline_run_id)
             if baseline["ticker"] != ticker:
-                raise ResearchError("baseline_ticker_mismatch", "基准 run 属于其他股票", exit_code=2)
+                raise ResearchError(
+                    "baseline_ticker_mismatch", "基准 run 属于其他股票", exit_code=2
+                )
             if baseline["status"] != "completed":
                 raise ResearchError("baseline_not_completed", "基准 run 尚未完成", exit_code=2)
             if storage.parse_iso(baseline["as_of"]) > target_as_of:
@@ -498,12 +548,16 @@ def save_draft(
             raise ResearchError("ticker_mismatch", "草稿 ticker 与 run 不一致", exit_code=2)
         for source in packet.sources:
             if source.ticker != run["ticker"]:
-                raise ResearchError("source_ticker_mismatch", "来源 ticker 与 run 不一致", exit_code=2)
+                raise ResearchError(
+                    "source_ticker_mismatch", "来源 ticker 与 run 不一致", exit_code=2
+                )
         effective_sources = _effective_sources(connection, run_id, packet.sources)
         issues = validate_packet(ResearchPacket(draft=packet.draft, sources=effective_sources))
         connection.execute("BEGIN IMMEDIATE")
         try:
-            storage.update_draft(connection, run_id, packet.draft.model_dump_json(), storage.now_utc())
+            storage.update_draft(
+                connection, run_id, packet.draft.model_dump_json(), storage.now_utc()
+            )
             for source in packet.sources:
                 storage.upsert_source(connection, _source_row(source))
                 storage.link_run_source(connection, run_id, source_id_text(source.id))
@@ -548,7 +602,7 @@ def _semantic_review_issues(
     row = storage.latest_draft_review(connection, str(run["id"]))  # type: ignore[arg-type]
     if row is None:
         return [ValidationIssue("semantic_review_missing", "review", "该草稿尚未完成语义审查")]
-    from .fixed_quality import validate_review
+    from wonder_stockresearch.fixed.fixed_quality import validate_review
 
     try:
         review = DraftReview.model_validate_json(row["review_json"])
@@ -578,14 +632,16 @@ def save_draft_review(
         if run["status"] != "draft":
             raise ResearchError("invalid_status", "只有 draft 可以保存语义审查", exit_code=2)
         packet = _packet_from_run(connection, run)
-        from .fixed_quality import validate_review
+        from wonder_stockresearch.fixed.fixed_quality import validate_review
 
         validation = validate_review(
             review, packet.draft, {source_id_text(source.id) for source in packet.sources}
         )
         structural = [issue for issue in validation if issue.code != "semantic_review_failed"]
         if structural:
-            raise ResearchError("invalid_semantic_review", "语义审查结果无效", exit_code=2, issues=structural)
+            raise ResearchError(
+                "invalid_semantic_review", "语义审查结果无效", exit_code=2, issues=structural
+            )
         storage.insert_draft_review(
             connection,
             run_id=run_id,
@@ -598,7 +654,11 @@ def save_draft_review(
             review_json=review.model_dump_json(),
             created_at=storage.now_utc(),
         )
-    return {"run_id": run_id, "review_status": review.status, "draft_hash": review.draft_hash}, validation
+    return {
+        "run_id": run_id,
+        "review_status": review.status,
+        "draft_hash": review.draft_hash,
+    }, validation
 
 
 def _verify_completed_artifacts(root: Path, run: dict[str, object]) -> dict[str, object]:
@@ -606,7 +666,10 @@ def _verify_completed_artifacts(root: Path, run: dict[str, object]) -> dict[str,
         raise ResearchError("artifact_missing", "completed run 缺少产物哈希", exit_code=1)
     hashes = json.loads(run["artifact_hashes_json"])  # type: ignore[arg-type]
     directory = storage.run_dir(
-        root, run["ticker"], storage.parse_iso(run["created_at"]), run["id"]  # type: ignore[arg-type]
+        root,
+        run["ticker"],
+        storage.parse_iso(run["created_at"]),
+        run["id"],  # type: ignore[arg-type]
     )
     for name, expected in hashes.items():
         path = directory / name
@@ -621,7 +684,7 @@ def _verify_completed_artifacts(root: Path, run: dict[str, object]) -> dict[str,
 
 
 def finish_run(root: Path, run_id: str) -> dict[str, object]:
-    from .reports import render_company, render_review
+    from wonder_stockresearch.fixed.reports import render_company, render_review
 
     storage.initialize(root)
     with storage.project_lock(root), storage.open_db(root) as connection:
@@ -629,7 +692,9 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
         if run["status"] == "completed":
             return _verify_completed_artifacts(root, run)
         if run["status"] != "draft":
-            raise ResearchError("invalid_status", "只有 draft 可以 finish；failed 请先 resume", exit_code=2)
+            raise ResearchError(
+                "invalid_status", "只有 draft 可以 finish；failed 请先 resume", exit_code=2
+            )
         if not run["draft_json"]:
             raise ResearchError("empty_draft", "该 run 还没有保存草稿", exit_code=2)
         packet = _packet_from_run(connection, run)
@@ -659,7 +724,7 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             "kind": run["kind"],
             "as_of": draft.as_of.isoformat(),
             "status": "completed",
-            "score_total": derive_score_total(draft),
+            **derive_score_summary(draft),
             "quality_status": derive_quality_status(draft),
             "draft": json.loads(draft.model_dump_json()),
             "sources": [json.loads(source.model_dump_json()) for source in packet.sources],
@@ -671,7 +736,10 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
         if comparison is not None:
             snapshot["comparison"] = comparison
         directory = storage.run_dir(
-            root, run["ticker"], storage.parse_iso(run["created_at"]), run_id  # type: ignore[arg-type]
+            root,
+            run["ticker"],
+            storage.parse_iso(run["created_at"]),
+            run_id,  # type: ignore[arg-type]
         )
         try:
             storage.write_atomic(directory / "company.md", company_markdown)
@@ -690,7 +758,9 @@ def finish_run(root: Path, run_id: str) -> dict[str, object]:
             storage.mark_run_failed(
                 connection,
                 run_id,
-                json.dumps({"code": "artifact_write_failed", "message": str(error)}, ensure_ascii=False),
+                json.dumps(
+                    {"code": "artifact_write_failed", "message": str(error)}, ensure_ascii=False
+                ),
                 storage.now_utc(),
             )
             raise ResearchError("artifact_write_failed", f"写入产物失败：{error}") from error
@@ -761,13 +831,20 @@ def get_status(root: Path, run_id: str) -> dict[str, object]:
             data["answer_count"] = len(draft.answers)
         else:
             data["score_total"] = None
+            data["provisional_score_total"] = None
+            data["provisional_prior_per_missing_dimension"] = PROVISIONAL_MOAT_PRIOR
+            data["scored_dimension_count"] = 0
+            data["missing_dimensions"] = list(MOAT_IDS)
+            data["uncertainty_range"] = None
             data["quality_status"] = "draft"
             data["answer_count"] = 0
         data["source_count"] = len(storage.get_run_sources(connection, run_id))
         reconciliation = storage.list_source_conflicts(connection, run_id)
         data["source_reconciliation"] = {
             "matched": sum(row["status"] == "matched" for row in reconciliation),
-            "provider_unverified": sum(row["status"] == "provider_unverified" for row in reconciliation),
+            "provider_unverified": sum(
+                row["status"] == "provider_unverified" for row in reconciliation
+            ),
             "conflicts": sum(row["status"] == "conflict" for row in reconciliation),
             "warning": "部分富途数值尚无同 run 官方结构化明细可核对"
             if any(row["status"] == "provider_unverified" for row in reconciliation)
@@ -778,7 +855,10 @@ def get_status(root: Path, run_id: str) -> dict[str, object]:
         if write_steps:
             latest_metadata = write_steps[-1].get("metadata_json")  # type: ignore[union-attr]
             parsed_metadata = json.loads(latest_metadata) if latest_metadata else {}
-            calls = int(parsed_metadata.get("model_calls") or len(parsed_metadata.get("model_attempts") or []))
+            calls = int(
+                parsed_metadata.get("model_calls")
+                or len(parsed_metadata.get("model_attempts") or [])
+            )
             data["call_budget"] = {
                 "used": calls,
                 "limit": 14,
@@ -807,7 +887,8 @@ def get_status(root: Path, run_id: str) -> dict[str, object]:
             review = DraftReview.model_validate_json(review_row["review_json"])
             current_hash = None
             if run["draft_json"]:
-                from .fixed_quality import draft_hash
+                from wonder_stockresearch.fixed.fixed_quality import draft_hash
+
                 current_hash = draft_hash(ResearchDraft.model_validate_json(run["draft_json"]))
             data["semantic_review"] = {
                 "status": "stale" if current_hash != review.draft_hash else review.status,
@@ -831,7 +912,7 @@ def get_draft(root: Path, run_id: str) -> dict[str, object]:
         if not run["draft_json"]:
             raise ResearchError("empty_draft", "该 run 尚无已保存草稿", exit_code=2)
         draft = ResearchDraft.model_validate_json(run["draft_json"])
-    from .fixed_quality import draft_hash
+    from wonder_stockresearch.fixed.fixed_quality import draft_hash
 
     return {
         "run_id": run_id,
@@ -865,7 +946,7 @@ def get_draft_review(root: Path, run_id: str) -> dict[str, object]:
 
 def preview_draft(root: Path, run_id: str) -> dict[str, object]:
     """生成 data/tmp 下的非权威 Markdown 草稿预览，不改变 run。"""
-    from .reports import render_company, render_draft_review
+    from wonder_stockresearch.fixed.reports import render_company, render_draft_review
 
     storage.initialize(root)
     with storage.open_db(root) as connection:
@@ -884,7 +965,12 @@ def preview_draft(root: Path, run_id: str) -> dict[str, object]:
         review_path = directory / "quality-review.md"
         storage.write_atomic(review_path, render_draft_review(review, run_id=run_id))
         artifacts["quality-review.md"] = storage.relative_path(root, review_path)
-    return {"run_id": run_id, "ticker": run["ticker"], "status": run["status"], "artifacts": artifacts}
+    return {
+        "run_id": run_id,
+        "ticker": run["ticker"],
+        "status": run["status"],
+        "artifacts": artifacts,
+    }
 
 
 def get_history(root: Path, ticker: str) -> dict[str, object]:
@@ -1084,8 +1170,11 @@ def _reconciliation_issues(
         for row in conflicts
         if row["status"] == source_policy.ReconciliationStatus.CONFLICT.value
         and frozenset(
-            source_id for source_id in (row["provider_source_id"], row["official_source_id"]) if source_id
-        ) not in resolved_pairs
+            source_id
+            for source_id in (row["provider_source_id"], row["official_source_id"])
+            if source_id
+        )
+        not in resolved_pairs
     ]
 
 
@@ -1446,7 +1535,12 @@ def _collect_fundamentals(
             try:
                 payload = provider.fetch(dataset, ticker)
                 body = json.dumps(
-                    {"provider": provider.name, "dataset": dataset, "observed_at": observed_at, **payload},
+                    {
+                        "provider": provider.name,
+                        "dataset": dataset,
+                        "observed_at": observed_at,
+                        **payload,
+                    },
                     ensure_ascii=False,
                     default=str,
                 ).encode("utf-8")
@@ -1481,8 +1575,13 @@ def _collect_fundamentals(
         error_payload = {"failures": failures} if failures else None
         if source_ids:
             _end_step(
-                root, run_id, step_key, attempt, "succeeded",
-                output_ref=f"source:{source_ids[0]}", error=error_payload,
+                root,
+                run_id,
+                step_key,
+                attempt,
+                "succeeded",
+                output_ref=f"source:{source_ids[0]}",
+                error=error_payload,
             )
             results.append(
                 {
@@ -1545,7 +1644,11 @@ def collect(
                 payload = _error_payload(error)
                 for step_key in ("market_snapshot",):
                     attempt = _begin_step(
-                        root, run_id, step_key, "futu", _input_hash({"ticker": ticker, "step": step_key})
+                        root,
+                        run_id,
+                        step_key,
+                        "futu",
+                        _input_hash({"ticker": ticker, "step": step_key}),
                     )
                     _end_step(root, run_id, step_key, attempt, "blocked", error=payload)
                     results.append({"step_key": step_key, "status": "blocked", "error": payload})
@@ -1573,7 +1676,11 @@ def collect(
                 payload = _error_payload(error)
                 for step_key, _datasets in FUNDAMENTAL_TASKS:
                     attempt = _begin_step(
-                        root, run_id, step_key, "futu", _input_hash({"ticker": ticker, "step": step_key})
+                        root,
+                        run_id,
+                        step_key,
+                        "futu",
+                        _input_hash({"ticker": ticker, "step": step_key}),
                     )
                     _end_step(root, run_id, step_key, attempt, "blocked", error=payload)
                     results.append({"step_key": step_key, "status": "blocked", "error": payload})
@@ -1592,7 +1699,9 @@ def collect(
         )
 
     if kind in {"all", "filings"}:
-        progress.emit(on_progress, "collect.filings", "started", "正在发现和归档公告", run_id=run_id)
+        progress.emit(
+            on_progress, "collect.filings", "started", "正在发现和归档公告", run_id=run_id
+        )
         provider = disclosure_provider
         if provider is None:
             try:
@@ -1600,7 +1709,11 @@ def collect(
             except sources.SourceError as error:
                 payload = _error_payload(error)
                 attempt = _begin_step(
-                    root, run_id, "filings", "disclosures", _input_hash({"ticker": ticker, "step": "filings"})
+                    root,
+                    run_id,
+                    "filings",
+                    "disclosures",
+                    _input_hash({"ticker": ticker, "step": "filings"}),
                 )
                 _end_step(root, run_id, "filings", attempt, "blocked", error=payload)
                 results.append({"step_key": "filings", "status": "blocked", "error": payload})
@@ -1612,7 +1725,9 @@ def collect(
                 close = getattr(provider, "close", None)
                 if callable(close):
                     close()
-        progress.emit(on_progress, "collect.filings", "completed", "公告发现和归档完成", run_id=run_id)
+        progress.emit(
+            on_progress, "collect.filings", "completed", "公告发现和归档完成", run_id=run_id
+        )
 
     issues: list[ValidationIssue] = []
     for result in results:
@@ -1775,7 +1890,8 @@ def _build_comparison(
     current_total = derive_score_total(current_draft)
 
     baseline_source_ids = {
-        row["id"] for row in storage.get_run_sources(connection, baseline["id"])  # type: ignore[arg-type]
+        row["id"]
+        for row in storage.get_run_sources(connection, baseline["id"])  # type: ignore[arg-type]
     }
     current_rows = storage.get_run_sources(connection, run["id"])  # type: ignore[arg-type]
     current_source_ids = {row["id"] for row in current_rows}
@@ -1853,7 +1969,9 @@ def compare_runs(root: Path, run_id: str) -> dict[str, object]:
         run = _require_run(connection, run_id)
         baseline_id = run["baseline_run_id"]
         if not baseline_id:
-            raise ResearchError("no_baseline", "该 run 没有关联 baseline，无法 compare", exit_code=2)
+            raise ResearchError(
+                "no_baseline", "该 run 没有关联 baseline，无法 compare", exit_code=2
+            )
         if not run["draft_json"]:
             raise ResearchError("empty_draft", "该 run 还没有保存草稿", exit_code=2)
         baseline = _require_run(connection, str(baseline_id))
@@ -1865,7 +1983,9 @@ def compare_runs(root: Path, run_id: str) -> dict[str, object]:
 def _backup_destination(root: Path, output: str) -> Path:
     backups_root = (root / "data" / "backups").resolve()
     requested = Path(output)
-    destination = (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    destination = (
+        (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    )
     if destination == backups_root or not destination.is_relative_to(backups_root):
         raise ResearchError(
             "invalid_backup_output", "--output 必须是 root/data/backups/ 下的新目录", exit_code=2
@@ -1881,6 +2001,7 @@ RESTORE_INSTRUCTIONS = """# 备份恢复说明
 
 1. 新建 `<root>` 并放入本项目的 `pyproject.toml`。
 2. 复制 `wonder.db` 到 `<root>/data/wonder.db`。
+   若 manifest 含 `company_database`，亦复制 `company.db` 到 `<root>/data/company.db` 并核对其哈希。
 3. 按 `manifest.json` 中 `files[].path`（项目相对路径），把 `files/<path>` 复制到 `<root>/<path>`。
 4. 校验：对 `manifest.json` 的每个 `files[].sha256` 与实际文件比对；数据库 `database.sha256` 亦然。
 5. 运行 `uv run wonder-research --root <root> history <TICKER>` 与 `status <RUN_ID>` 确认历史可读；
@@ -1906,6 +2027,7 @@ def backup(
         files_root.mkdir(parents=True)
         database_path = destination / "wonder.db"
         storage.backup_database(root, database_path)
+        company_database = company_data.backup_database(root, destination / "company.db")
         entries: list[dict[str, object]] = []
         missing: list[str] = []
         with storage.open_db(root) as connection:
@@ -1917,6 +2039,10 @@ def backup(
                 if not relative:
                     continue
                 source_path = root / str(relative)
+                if not source_path.resolve().is_relative_to(root.resolve() / "data"):
+                    raise ResearchError(
+                        "unsafe_source_path", "备份来源路径越出项目 data", exit_code=2
+                    )
                 if not source_path.is_file():
                     if str(relative).startswith("data/stocks/"):
                         missing.append(str(relative))
@@ -1955,6 +2081,54 @@ def backup(
                         "sha256": storage.sha256_file(target),
                     }
                 )
+        # 从主库备份读取对应状态，避免把未提交的函数文件当作已完成产物。
+        incomplete_analyses = []
+        with sqlite3.connect(database_path) as snapshot_connection:
+            snapshot_connection.row_factory = sqlite3.Row
+            analyses = snapshot_connection.execute("SELECT * FROM analysis_runs").fetchall()
+        for analysis in analyses:
+            status = analysis["status"]
+            if analysis["sql_hash"]:
+                names = ["snapshot.db", "schema.json", "query.sql"]
+                if status in {"sql_succeeded", "function_succeeded", "function_failed"}:
+                    names.append("sql-result.json")
+                if status == "function_succeeded":
+                    names.extend(["function.py", "function-result.json"])
+            else:
+                names = ["input.json"]
+                if status == "succeeded":
+                    names.extend(["code.py", "result.json"])
+            if status in {"sql_running", "running", "created", "dataset_ready"}:
+                incomplete_analyses.append(analysis["id"])
+            directory = (root / analysis["workspace_path"]).resolve()
+            if not directory.is_relative_to(root.resolve() / "data" / "tmp" / "analysis"):
+                raise ResearchError(
+                    "unsafe_analysis_path", "分析产物路径越出项目分析目录", exit_code=2
+                )
+            for name in names:
+                artifact = directory / name
+                relative = storage.relative_path(root, artifact)
+                if artifact.is_symlink():
+                    raise ResearchError(
+                        "unsafe_analysis_path", "备份拒绝分析产物符号链接", exit_code=2
+                    )
+                if not artifact.is_file():
+                    missing.append(relative)
+                    continue
+                before = storage.sha256_file(artifact)
+                target = files_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(artifact, target)
+                copied = storage.sha256_file(target)
+                if copied != before or storage.sha256_file(artifact) != before:
+                    raise ResearchError(
+                        "analysis_backup_changed", "分析文件在备份期间变化，请重试", exit_code=2
+                    )
+                if name == "function.py" and copied != analysis["code_hash"]:
+                    raise ResearchError(
+                        "analysis_backup_mismatch", "函数文件与主库代码哈希不一致", exit_code=2
+                    )
+                entries.append({"path": relative, "kind": "analysis_artifact", "sha256": copied})
         manifest = {
             "created_at": storage.to_iso(storage.now_utc()),
             "schema_version": storage.SCHEMA_VERSION,
@@ -1962,16 +2136,21 @@ def backup(
                 "path": "wonder.db",
                 "sha256": storage.sha256_file(database_path),
             },
-            "file_count": len(entries),
-            "files": entries,
+            "company_database": company_database,
+            "incomplete_analyses": incomplete_analyses,
+            "file_count": len({entry["path"]: entry for entry in entries}),
+            "files": list({entry["path"]: entry for entry in entries}.values()),
             "missing": missing,
         }
         manifest_path = destination / "manifest.json"
-        storage.write_atomic(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        storage.write_atomic(
+            manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        )
         storage.write_atomic(destination / "RESTORE.md", RESTORE_INSTRUCTIONS)
     return {
         "output": storage.relative_path(root, destination),
         "database": "wonder.db",
+        "company_database": company_database,
         "file_count": len(entries),
         "missing": missing,
         "manifest": storage.relative_path(root, manifest_path),

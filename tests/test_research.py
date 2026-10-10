@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from tests.fixtures import copy_synthetic_packet
+from wonder_stockresearch.fixed.research import (
+    derive_score_summary,
+    derive_score_total,
+    validate_packet,
+)
 from wonder_stockresearch.models import ResearchPacket
-from wonder_stockresearch.research import derive_score_total, validate_packet
 
 
 def test_complete_synthetic_packet_validates_and_unknown_score_stays_unknown() -> None:
@@ -11,6 +15,23 @@ def test_complete_synthetic_packet_validates_and_unknown_score_stays_unknown() -
 
     assert validate_packet(packet) == []
     assert derive_score_total(packet.draft) is None
+    summary = derive_score_summary(packet.draft)
+    assert summary == {
+        "score_total": None,
+        "provisional_score_total": 28,
+        "provisional_prior_per_missing_dimension": 3,
+        "scored_dimension_count": 5,
+        "missing_dimensions": ["M3"],
+        "uncertainty_range": {"min": 25, "max": 35},
+    }
+
+
+def test_provisional_score_does_not_mutate_unknown_dimension() -> None:
+    packet = ResearchPacket.model_validate(copy_synthetic_packet())
+
+    derive_score_summary(packet.draft)
+
+    assert packet.draft.moats[2].score is None
 
 
 def test_validator_rejects_duplicate_question_and_unknown_evidence_source() -> None:

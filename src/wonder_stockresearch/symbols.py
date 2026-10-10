@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import envfile, market, storage, writer
+from . import envfile, market, model_request, storage
 from .models import SymbolCandidate, validate_ticker
 from .sources import SourceError
 
@@ -175,9 +175,9 @@ def _model_candidates(root: Path, query: str, model: str | None) -> list[SymbolC
         "不确定的候选不要写；不能确认 ticker 时不要编造。"
         "这些候选只供用户选择，不能表示已由行情数据源验证。"
     )
-    response = writer._request_deepseek(
-        api_key=writer._api_key(),
-        model=writer._resolved_model(model),
+    response = model_request.request_deepseek(
+        api_key=model_request.api_key(),
+        model=model_request.resolved_model(model),
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": query.strip()},
@@ -185,7 +185,7 @@ def _model_candidates(root: Path, query: str, model: str | None) -> list[SymbolC
         temperature=0.0,
         thinking="disabled",
     )
-    content = writer._extract_content(response)
+    content = model_request.extract_content(response)
     payload = json.loads(content)
     raw_candidates = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(raw_candidates, list):
@@ -250,6 +250,6 @@ def resolve(
 
     try:
         model_items = _sort_candidates(query, _model_candidates(root, query, model))
-    except (writer.WriterError, json.JSONDecodeError, TypeError, ValueError) as error:
+    except (model_request.ModelRequestError, json.JSONDecodeError, TypeError, ValueError) as error:
         return ResolutionResult([], provider_error=provider_error, model_error=str(error))
     return ResolutionResult(model_items, provider_error=provider_error)

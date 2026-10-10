@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures import copy_synthetic_packet
-from wonder_stockresearch import cli, research, storage
+from wonder_stockresearch import cli, storage
 from wonder_stockresearch.cli import main
+from wonder_stockresearch.fixed import research
+from wonder_stockresearch.fixed.research import ResearchError
 from wonder_stockresearch.models import ResearchPacket
-from wonder_stockresearch.research import ResearchError
 
 
 def make_root(tmp_path: Path) -> Path:
@@ -155,7 +156,9 @@ def test_cli_watch_start_save_status_finish(tmp_path: Path, capsys: object) -> N
     """Breaking the JSON contract or the run lifecycle must fail this test."""
     root = make_root(tmp_path)
     packet_path = tmp_path / "packet.json"
-    packet_path.write_text(json.dumps(copy_synthetic_packet(), ensure_ascii=False), encoding="utf-8")
+    packet_path.write_text(
+        json.dumps(copy_synthetic_packet(), ensure_ascii=False), encoding="utf-8"
+    )
 
     assert main(["--root", str(root), "watch", "add", "SYNTHETIC", "--name", "教学公司"]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["watched"] is True
@@ -220,7 +223,8 @@ def test_tty_finish_prints_paths_and_retry_summary_without_raw_json(
 
     run_dir = next((root / "data" / "stocks" / "SYNTHETIC" / "runs").iterdir()).resolve()
     assert "正式报告已完成并冻结" in terminal.value
-    assert "护城河总分：未评估 / 60" in terminal.value
+    assert "护城河严格证据总分：未评估 / 60" in terminal.value
+    assert "护城河可用暂定总分：28 / 60" in terminal.value
     assert f"运行目录：{run_dir}" in terminal.value
     assert f"报告：{run_dir / 'company.md'}" in terminal.value
     assert f"结构化数据：{run_dir / 'research.json'}" in terminal.value
@@ -246,7 +250,8 @@ def test_finish_summary_handles_optional_review_and_null_score(tmp_path: Path) -
 
     without_review = cli._finish_summary(root, result)
     assert "质量：证据不完整" in without_review
-    assert "护城河总分：未评估 / 60" in without_review
+    assert "护城河严格证据总分：未评估 / 60" in without_review
+    assert "护城河可用暂定总分：未评估 / 60" in without_review
     assert "复评报告：" not in without_review
     assert str(run_dir.resolve()) in without_review
 

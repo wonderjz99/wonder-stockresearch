@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -11,7 +12,21 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import agent, chat, envfile, progress, research, skill_registry, storage, writer
+from wonder_stockresearch import (
+    agent,
+    chat,
+    company_data,
+    envfile,
+    observability,
+    progress,
+    skill_registry,
+    storage,
+)
+from wonder_stockresearch.fixed import research, writer
+from wonder_stockresearch.fixed.reports import render_company
+from wonder_stockresearch.fixed.research import ResearchError, ValidationIssue, validate_packet
+from wonder_stockresearch.fixed.writer import WriterError
+
 from .models import (
     DraftReview,
     InteractiveFollowup,
@@ -20,11 +35,8 @@ from .models import (
     ResearchPacket,
     SourceRequest,
 )
-from .reports import render_company
-from .research import ResearchError, ValidationIssue, validate_packet
 from .router import RouterError
 from .sources import SourceError
-from .writer import WriterError
 
 
 class CommandError(Exception):
@@ -52,7 +64,9 @@ def _project_root(value: str) -> Path:
 
 def _read_packet(input_path: str) -> ResearchPacket:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
     try:
@@ -63,14 +77,17 @@ def _read_packet(input_path: str) -> ResearchPacket:
         return ResearchPacket.model_validate(payload)
     except ValidationError as error:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}"
+            for item in error.errors()
         )
         raise CommandError("invalid_packet", f"输入不符合 ResearchPacket：{details}", 2) from error
 
 
 def _read_source_request(input_path: str) -> SourceRequest:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
     try:
@@ -81,14 +98,19 @@ def _read_source_request(input_path: str) -> SourceRequest:
         return SourceRequest.model_validate(payload)
     except ValidationError as error:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}"
+            for item in error.errors()
         )
-        raise CommandError("invalid_source_request", f"输入不符合 SourceRequest：{details}", 2) from error
+        raise CommandError(
+            "invalid_source_request", f"输入不符合 SourceRequest：{details}", 2
+        ) from error
 
 
 def _read_draft_review(input_path: str) -> DraftReview:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
         return DraftReview.model_validate_json(raw)
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取审查 JSON：{error}", 1) from error
@@ -98,7 +120,9 @@ def _read_draft_review(input_path: str) -> DraftReview:
 
 def _read_interactive_question(input_path: str) -> InteractiveQuestion:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
     try:
@@ -109,14 +133,19 @@ def _read_interactive_question(input_path: str) -> InteractiveQuestion:
         return InteractiveQuestion.model_validate(payload)
     except ValidationError as error:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}"
+            for item in error.errors()
         )
-        raise CommandError("invalid_interactive_question", f"输入不符合 InteractiveQuestion：{details}", 2) from error
+        raise CommandError(
+            "invalid_interactive_question", f"输入不符合 InteractiveQuestion：{details}", 2
+        ) from error
 
 
 def _read_interactive_followup(input_path: str) -> InteractiveFollowup:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
     try:
@@ -127,14 +156,19 @@ def _read_interactive_followup(input_path: str) -> InteractiveFollowup:
         return InteractiveFollowup.model_validate(payload)
     except ValidationError as error:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}"
+            for item in error.errors()
         )
-        raise CommandError("invalid_interactive_followup", f"输入不符合 InteractiveFollowup：{details}", 2) from error
+        raise CommandError(
+            "invalid_interactive_followup", f"输入不符合 InteractiveFollowup：{details}", 2
+        ) from error
 
 
 def _read_memo_request(input_path: str) -> MemoRequest:
     try:
-        raw = sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read() if input_path == "-" else Path(input_path).read_text(encoding="utf-8")
+        )
     except OSError as error:
         raise CommandError("input_read_error", f"无法读取 JSON 输入：{error}", 1) from error
     try:
@@ -145,9 +179,12 @@ def _read_memo_request(input_path: str) -> MemoRequest:
         return MemoRequest.model_validate(payload)
     except ValidationError as error:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}" for item in error.errors()
+            f"{'.'.join(str(part) for part in item['loc'])}：{item['msg']}"
+            for item in error.errors()
         )
-        raise CommandError("invalid_memo_request", f"输入不符合 MemoRequest：{details}", 2) from error
+        raise CommandError(
+            "invalid_memo_request", f"输入不符合 MemoRequest：{details}", 2
+        ) from error
 
 
 def _validation_payload(issues: list[ValidationIssue]) -> list[dict[str, str]]:
@@ -157,7 +194,9 @@ def _validation_payload(issues: list[ValidationIssue]) -> list[dict[str, str]]:
 def _render_output_path(root: Path, output: str) -> Path:
     data_root = (root / "data").resolve()
     requested = Path(output)
-    destination = (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    destination = (
+        (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    )
     if not destination.is_relative_to(data_root):
         raise CommandError("invalid_output", "--output 必须位于项目 root/data/ 下", 2)
     return destination
@@ -197,9 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("ticker")
     start.add_argument("--as-of", default=None, help="带时区的 ISO 时间；默认当前时间")
     start.add_argument("--baseline", default=None, help="同股票已完成的基准 run_id")
-    start.add_argument("--skill", action="append", default=[], help="选择一个可用 Skill；可重复指定")
+    start.add_argument(
+        "--skill", action="append", default=[], help="选择一个可用 Skill；可重复指定"
+    )
     subparsers.add_parser("skill-list", help="列出项目 Skill Catalog 和可用性")
-    skill_check = subparsers.add_parser("skill-check", help="检查一个 Skill 或全部 Skill 的 manifest、依赖和 capability")
+    skill_check = subparsers.add_parser(
+        "skill-check", help="检查一个 Skill 或全部 Skill 的 manifest、依赖和 capability"
+    )
     skill_check.add_argument("name", nargs="?", default=None)
     status = subparsers.add_parser("status", help="查看 run 状态")
     status.add_argument("run_id")
@@ -207,6 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     draft_read.add_argument("run_id")
     review_read = subparsers.add_parser("review-read", help="只读输出最新结构化审查 JSON")
     review_read.add_argument("run_id")
+    trace_read = subparsers.add_parser("trace-read", help="查看某个 research run 的安全调用轨迹")
+    trace_read.add_argument("run_id")
     draft_preview = subparsers.add_parser("draft-preview", help="生成未定稿 Markdown 预览")
     draft_preview.add_argument("run_id")
     history = subparsers.add_parser("history", help="查看某股票的研究历史")
@@ -231,7 +276,9 @@ def build_parser() -> argparse.ArgumentParser:
     source_read.add_argument("source_id")
     source_read.add_argument("--page", type=int, default=None, help="PDF 页码（从 1 起）")
     source_read.add_argument("--start-line", type=int, default=None, help="提取文本起始行")
-    source_read.add_argument("--limit-lines", type=int, default=None, help="返回行数，默认 120，上限 300")
+    source_read.add_argument(
+        "--limit-lines", type=int, default=None, help="返回行数，默认 120，上限 300"
+    )
     collect = subparsers.add_parser("collect", help="采集行情/财务/公告")
     collect.add_argument("run_id")
     collect.add_argument(
@@ -242,13 +289,35 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("run_id")
     backup = subparsers.add_parser("backup", help="备份数据库、来源与完成报告")
     backup.add_argument("--output", required=True, help="root/data/backups/ 下的新目录")
-    write_draft = subparsers.add_parser("write-draft", help="调用 DeepSeek 生成草稿（不自动 finish）")
+    company = subparsers.add_parser("company-data", help="离线公司库：导入、重建和检查归档事实")
+    company_commands = company.add_subparsers(dest="company_action", required=True)
+    for action in ("sync", "status"):
+        command = company_commands.add_parser(action)
+        command.add_argument("ticker", nargs="?", help="省略则包含全部公司")
+    company_commands.add_parser("rebuild", help="完整重建；失败不替换原公司库")
+    for action in ("fields", "read"):
+        command = company_commands.add_parser(action)
+        command.add_argument("ticker")
+        command.add_argument("--dataset", choices=company_data.DATASETS)
+        command.add_argument("--field", default=None, help="原始字段键或名称，精确匹配")
+        command.add_argument("--period", default=None)
+        command.add_argument("--source-id", default=None)
+        command.add_argument("--limit", type=int, default=50, help="每表返回条数，1–200")
+        command.add_argument("--offset", type=int, default=0)
+    write_draft = subparsers.add_parser(
+        "write-draft", help="调用 DeepSeek 生成草稿（不自动 finish）"
+    )
     write_draft.add_argument("run_id")
     write_draft.add_argument("--strategy", choices=["staged", "one-shot"], default="staged")
     write_draft.add_argument("--provider", choices=["deepseek"], default="deepseek")
-    write_draft.add_argument("--model", default=None, help="模型名；默认 deepseek-flash 或 WONDER_DEEPSEEK_MODEL")
     write_draft.add_argument(
-        "--temperature", type=float, default=None, help="采样温度 0–2；默认 0.2 或 WONDER_DEEPSEEK_TEMPERATURE"
+        "--model", default=None, help="模型名；默认 deepseek-flash 或 WONDER_DEEPSEEK_MODEL"
+    )
+    write_draft.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="采样温度 0–2；默认 0.2 或 WONDER_DEEPSEEK_TEMPERATURE",
     )
     write_draft.add_argument(
         "--thinking",
@@ -262,18 +331,41 @@ def build_parser() -> argparse.ArgumentParser:
     review_draft.add_argument("--provider", choices=["deepseek"], default="deepseek")
     review_draft.add_argument("--model", default=None)
     review_draft.add_argument("--input", default=None, help="DraftReview JSON；- 代表 stdin")
+    review_draft.add_argument(
+        "--recheck", action="store_true", help="离线复核既有模型审查；不调用 API"
+    )
 
     ask = subparsers.add_parser("ask", help="回答公司临时问题，不修改正式报告")
     ask.add_argument("ticker")
     ask.add_argument("--input", required=True, help="InteractiveQuestion JSON；- 代表 stdin")
-    ask.add_argument("--model", default=None, help="模型名；默认 WONDER_DEEPSEEK_MODEL 或 deepseek-flash")
+    ask.add_argument(
+        "--model", default=None, help="模型名；默认 WONDER_DEEPSEEK_MODEL 或 deepseek-flash"
+    )
     ask.add_argument("--quiet", action="store_true", help="关闭简短进度输出")
     followup = subparsers.add_parser("ask-followup", help="继续交互 Agent session")
     followup.add_argument("session_id")
     followup.add_argument("--input", required=True, help="InteractiveFollowup JSON；- 代表 stdin")
     followup.add_argument("--quiet", action="store_true", help="关闭简短进度输出")
+    respond = subparsers.add_parser("ask-respond", help="向 waiting_user 的指定 Turn 补充信息")
+    respond.add_argument("session_id")
+    respond.add_argument("turn_id")
+    respond.add_argument("--input", required=True, help="InteractiveFollowup JSON；- 代表 stdin")
+    respond.add_argument("--quiet", action="store_true", help="关闭简短进度输出")
+    retry_agent = subparsers.add_parser("ask-retry", help="重试 failed 或 interrupted 的指定 Turn")
+    retry_agent.add_argument("session_id")
+    retry_agent.add_argument("turn_id")
+    retry_agent.add_argument("--quiet", action="store_true", help="关闭简短进度输出")
+    interrupt_agent = subparsers.add_parser(
+        "ask-interrupt", help="标记无存活进程的遗留 running Turn 为中断"
+    )
+    interrupt_agent.add_argument("session_id")
+    interrupt_agent.add_argument("turn_id")
     status_agent = subparsers.add_parser("ask-status", help="查看交互 Agent session")
     status_agent.add_argument("session_id")
+    agent_trace = subparsers.add_parser(
+        "agent-trace", help="查看交互 Agent 从模型调用到工具执行的调用轨迹"
+    )
+    agent_trace.add_argument("session_id")
     memo_save = subparsers.add_parser("memo-save", help="把交互结果明确保存为公司 Memo")
     memo_save.add_argument("session_id")
     memo_save.add_argument("--input", required=True, help="MemoRequest JSON；- 代表 stdin")
@@ -281,10 +373,14 @@ def build_parser() -> argparse.ArgumentParser:
     memo_list.add_argument("ticker")
     memo_read = subparsers.add_parser("memo-read", help="读取公司 Memo")
     memo_read.add_argument("memo_id")
-    memory_search = subparsers.add_parser("memory-search", help="检索某公司的长期记忆和临时 episode 索引")
+    memory_search = subparsers.add_parser(
+        "memory-search", help="检索某公司的长期记忆和临时 episode 索引"
+    )
     memory_search.add_argument("ticker")
     memory_search.add_argument("--query", default="", help="按主题或指标检索；省略时返回最近记录")
-    memory_read = subparsers.add_parser("memory-read", help="读取一条长期记忆或 provisional episode")
+    memory_read = subparsers.add_parser(
+        "memory-read", help="读取一条长期记忆或 provisional episode"
+    )
     memory_read.add_argument("memory_id")
     chat_cmd = subparsers.add_parser("chat", help="独立自然语言入口")
     chat_cmd.add_argument(
@@ -293,7 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="首次自然语言输入；终端中会继续追问，管道/重定向时输出一次 JSON",
     )
     chat_cmd.add_argument("--session-id", default=None, help="恢复已有自然语言 session")
-    chat_cmd.add_argument("--model", default=None, help="模型名；默认 WONDER_DEEPSEEK_MODEL 或 deepseek-flash")
+    chat_cmd.add_argument(
+        "--model", default=None, help="模型名；默认 WONDER_DEEPSEEK_MODEL 或 deepseek-flash"
+    )
     chat_cmd.add_argument("--quiet", action="store_true", help="关闭简短进度输出")
     return parser
 
@@ -306,16 +404,21 @@ def _finish_summary(root: Path, result: dict[str, object]) -> str:
     """Create a concise human-readable summary without exposing the raw result JSON."""
     run_id = str(result.get("run_id") or "")
     score = result.get("score_total")
+    provisional_score = result.get("provisional_score_total")
     quality = result.get("quality_status")
-    if (score is None or quality is None) and run_id:
+    if (score is None or provisional_score is None or quality is None) and run_id:
         try:
             current = research.get_status(root, run_id)
         except (ResearchError, storage.StorageError, OSError):
             current = {}
         if score is None:
             score = current.get("score_total")
+        if provisional_score is None:
+            provisional_score = current.get("provisional_score_total")
         if quality is None:
             quality = current.get("quality_status")
+    if provisional_score is None and score is not None:
+        provisional_score = score
 
     run_dir_value = result.get("run_dir")
     run_dir = Path(str(run_dir_value)) if run_dir_value else Path()
@@ -328,11 +431,15 @@ def _finish_summary(root: Path, result: dict[str, object]) -> str:
         "draft": "草稿",
     }.get(str(quality), "未知" if quality is None else str(quality))
     score_text = f"{score} / 60" if score is not None else "未评估 / 60"
+    provisional_text = (
+        f"{provisional_score} / 60" if provisional_score is not None else "未评估 / 60"
+    )
     lines = [
         "正式报告已完成并冻结",
         f"状态：{'已完成' if result.get('status') == 'completed' else result.get('status', '未知')}",
         f"质量：{quality_text}",
-        f"护城河总分：{score_text}",
+        f"护城河严格证据总分：{score_text}",
+        f"护城河可用暂定总分：{provisional_text}",
         f"运行目录：{run_dir}",
         f"报告：{run_dir / 'company.md'}",
         f"结构化数据：{run_dir / 'research.json'}",
@@ -351,11 +458,8 @@ def _print_finish_summary(root: Path, result: dict[str, object]) -> None:
 
 def _print_chat_response(root: Path, data: dict[str, object]) -> None:
     status = data.get("status")
-    if status == "validation_failed":
-        message = str(
-            data.get("message")
-            or "正式草稿未通过证据校验；正式报告没有生成或冻结。"
-        )
+    if status in {"validation_failed", "failed"}:
+        message = str(data.get("message") or "正式草稿未通过证据校验；正式报告没有生成或冻结。")
         print(message)
         if data.get("run_id"):
             print(f"run_id: {data['run_id']}")
@@ -404,7 +508,7 @@ def _chat_needs_followup(data: dict[str, object]) -> bool:
         "awaiting_confirmation",
         "awaiting_finish",
         "waiting_user",
-    }:
+    } or (status in {"failed", "validation_failed"} and bool(data.get("run_id"))):
         return True
     if status == "completed" and isinstance(data.get("result"), dict):
         # 交互 Agent 的 completed 结果可以继续追问；正式报告完成后直接退出。
@@ -431,11 +535,13 @@ def _run_chat_loop(
             continue
         if text.casefold() in {"exit", "quit", "退出"}:
             return 0
-        data = chat.run_once(root, text, session_id=session_id, model=args.model, on_progress=_progress_for(args))
+        data = chat.run_once(
+            root, text, session_id=session_id, model=args.model, on_progress=_progress_for(args)
+        )
         session_id = str(data.get("session_id") or session_id or "") or None
         _print_chat_response(root, data)
         if not _chat_needs_followup(data):
-            return 2 if data.get("status") == "validation_failed" else 0
+            return 2 if data.get("status") in {"validation_failed", "failed"} else 0
 
 
 def _run_chat(root: Path, args: argparse.Namespace) -> int:
@@ -465,12 +571,16 @@ def _run_chat(root: Path, args: argparse.Namespace) -> int:
         ):
             _print_finish_summary(root, data["result"])
             return 0
-        if sys.stdout.isatty() and data.get("status") == "validation_failed":
+        if sys.stdout.isatty() and data.get("status") in {"validation_failed", "failed"}:
             _print_chat_response(root, data)
             return 2
-        if data.get("status") == "validation_failed":
+        if data.get("status") in {"validation_failed", "failed"}:
             raw_issues = data.get("issues")
-            issues = [item for item in raw_issues if isinstance(item, dict)] if isinstance(raw_issues, list) else []
+            issues = (
+                [item for item in raw_issues if isinstance(item, dict)]
+                if isinstance(raw_issues, list)
+                else []
+            )
             _emit(False, data, issues)
             return 2
         _emit(True, data, [])
@@ -480,6 +590,41 @@ def _run_chat(root: Path, args: argparse.Namespace) -> int:
 
 
 def _run_business(root: Path, args: argparse.Namespace) -> int:
+    if args.command == "company-data":
+        try:
+            if args.company_action in {"sync", "rebuild"}:
+                data = company_data.sync(
+                    root,
+                    getattr(args, "ticker", None),
+                    rebuild=args.company_action == "rebuild",
+                )
+                issues = [
+                    {**issue, "location": "company_data", "severity": "error"}
+                    for issue in data["issues"]
+                ]
+                _emit(not issues, data, issues)
+                return 2 if issues else 0
+            if args.company_action == "status":
+                data = company_data.status(root, args.ticker)
+            else:
+                query = company_data.CompanyQuery(
+                    ticker=args.ticker,
+                    dataset=args.dataset,
+                    field=args.field,
+                    period=args.period,
+                    source_id=args.source_id,
+                    limit=args.limit,
+                    offset=args.offset,
+                )
+                data = company_data.read(root, query, fields=args.company_action == "fields")
+        except ValidationError as error:
+            raise CommandError("invalid_company_query", "公司查询参数不合法", 2) from error
+        except (sqlite3.Error, OSError) as error:
+            raise CommandError(
+                "company_storage_error", "公司库读写失败，请检查文件与数据库", 1
+            ) from error
+        _emit(True, data, [])
+        return 0
     if args.command == "skill-list":
         _emit(True, skill_registry.catalog(root).to_dict(), [])
         return 0
@@ -535,6 +680,9 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         return 0
     if args.command == "review-read":
         _emit(True, research.get_draft_review(root, args.run_id), [])
+        return 0
+    if args.command == "trace-read":
+        _emit(True, observability.read_run_trace(root, args.run_id), [])
         return 0
     if args.command == "draft-preview":
         _emit(True, research.preview_draft(root, args.run_id), [])
@@ -615,16 +763,32 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         _emit(ok, data, _validation_payload(issues))
         return 0 if ok else 2
     if args.command == "review-draft":
+        if args.recheck:
+            if args.input or args.model:
+                raise research.ResearchError(
+                    "invalid_review_options",
+                    "--recheck 不能与 --input 或 --model 同用",
+                    exit_code=2,
+                )
+            data, issues = writer.recheck_draft_review(root, args.run_id)
+            _emit(not issues, data, _validation_payload(issues))
+            return 0 if not issues else 2
         imported = _read_draft_review(args.input) if args.input else None
         data, issues = writer.review_draft(
-            root, args.run_id, provider=args.provider, model=args.model,
-            review=imported, reviewer_type="human" if imported else "model",
+            root,
+            args.run_id,
+            provider=args.provider,
+            model=args.model,
+            review=imported,
+            reviewer_type="human" if imported else "model",
         )
         _emit(not issues, data, _validation_payload(issues))
         return 0 if not issues else 2
     if args.command == "ask":
         question = _read_interactive_question(args.input)
-        data = agent.ask(root, args.ticker, question, model=args.model, on_progress=_progress_for(args))
+        data = agent.ask(
+            root, args.ticker, question, model=args.model, on_progress=_progress_for(args)
+        )
         _emit(True, data, [])
         return 0
     if args.command == "ask-followup":
@@ -632,8 +796,34 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         data = agent.followup(root, args.session_id, request, on_progress=_progress_for(args))
         _emit(True, data, [])
         return 0
+    if args.command == "ask-respond":
+        request = _read_interactive_followup(args.input)
+        data = agent.respond(
+            root,
+            args.session_id,
+            args.turn_id,
+            request,
+            on_progress=_progress_for(args),
+        )
+        _emit(True, data, [])
+        return 0
+    if args.command == "ask-retry":
+        data = agent.retry(
+            root,
+            args.session_id,
+            args.turn_id,
+            on_progress=_progress_for(args),
+        )
+        _emit(True, data, [])
+        return 0
     if args.command == "ask-status":
         _emit(True, agent.get_status(root, args.session_id), [])
+        return 0
+    if args.command == "ask-interrupt":
+        _emit(True, agent.interrupt(root, args.session_id, args.turn_id), [])
+        return 0
+    if args.command == "agent-trace":
+        _emit(True, observability.read_agent_trace(root, args.session_id), [])
         return 0
     if args.command == "memo-save":
         request = _read_memo_request(args.input)
@@ -687,6 +877,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except storage.StorageError as error:
         _emit(False, {}, [_error_issue(error.code, "storage", error.message)])
         return 1
+    except company_data.CompanyDataError as error:
+        _emit(False, {}, [_error_issue(error.code, "company_data", error.message)])
+        return error.exit_code
     except WriterError as error:
         _emit(False, {}, [_error_issue(error.code, "writer", error.message)])
         return error.exit_code
