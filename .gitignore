@@ -14,3 +14,16 @@ dist/
 node_modules/
 # 个人学习路线、练习成果与面试准备；不进入版本库。
 /study/
+# 个人开发材料仅保留在本地；原仓库公开时保留已有提交历史。
+# 已跟踪的文件还需 git rm --cached 才会停止跟踪；本规则不清理旧提交。
+/AGENTS.md
+/PLAN.md
+/PROGRESS.md
+/docs/[0-9][0-9]-*.md
+/docs/teaching-contract.md
+/docs/development-workflow.md
+/docs/decisions.md
+/docs/changes/
+/docs/history/
+# 历史宿主配置；当前项目独立运行。
+/opencode.json
