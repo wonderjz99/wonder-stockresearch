@@ -29,11 +29,18 @@ def transform_context(
     if exchanges:
         summary = (
             [ContextMessage("background", {"working_memory": working_memory})]
-            if (len(exchanges) > 4 and working_memory)
+            if working_memory
             else []
         )
         return [*user, *summary, *exchanges[-4:]]
-    return list(history)
+    restored = bool(working_memory) and any(
+        key in working_memory
+        for key in ("available_input", "field_selection", "last_error", "calculation", "final_only")
+    )
+    return [
+        *history,
+        *([ContextMessage("background", {"working_memory": working_memory})] if restored else []),
+    ]
 
 
 def convert_to_llm(

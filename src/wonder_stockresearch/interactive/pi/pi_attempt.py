@@ -15,6 +15,7 @@ from wonder_stockresearch.interactive import (
     agent_results,
     agent_session,
     agent_tools,
+    agent_working_record,
 )
 from wonder_stockresearch.interactive.agent_errors import AgentError
 from wonder_stockresearch.interactive.pi import pi_context, pi_evidence
@@ -36,6 +37,7 @@ class PiAttempt:
     candidate: AgentDecision | None = None
     repair_count: int = 0
     pending_tools: dict[str, agent_execution.PreparedTool] = field(default_factory=dict)
+    native_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     available_refs: dict[str, Any] = field(default_factory=dict)
     model_span: Any = None
     request_span: Any = None
@@ -101,18 +103,24 @@ class PiAttempt:
                 for item in messages
             ]
         remaining_calls = self.budget.max_iterations - self.budget.iteration
+        if remaining_calls == 1:
+            agent_execution.finish_tools(self.tool_state, "last_iteration")
         hint = f"运行状态：含本次还剩 {remaining_calls} 次决策；剩余累计预算 {remaining} tokens。"
         if remaining_calls == 1:
             hint += "请用已有结果给出 final；未完成部分写入 gaps，不再启动新工具。"
+        if self.tool_state.final_only:
+            hint += "纠正机会/工具轮次已结束；本轮无工具，必须按已有事实和缺口回答。"
         extra = []
-        memory = pi_context.working_memory(messages)
+        memory = json.dumps(
+            agent_working_record.project(self.tool_state.working_memory or {}), ensure_ascii=False
+        )
         if memory:
             extra.append({"role": "user", "content": "本 Turn 工作记录：" + memory, "timestamp": 0})
         extra.append({"role": "user", "content": hint, "timestamp": 0})
         projected = pi_context.project(
             messages,
             self.system,
-            [] if self.repair_count else self.tools,
+            [] if self.repair_count or self.tool_state.final_only else self.tools,
             max(0, target - pi_context.estimate("", [], extra)),
         )
         return [*projected, *extra]
@@ -124,7 +132,9 @@ class PiAttempt:
         if remaining <= 0:
             raise AgentError("agent_budget_exhausted", "Agent 已达到 token 预算")
         estimated = pi_context.estimate(
-            self.system, [] if self.repair_count else self.tools, payload["messages"]
+            self.system,
+            [] if self.repair_count or self.tool_state.final_only else self.tools,
+            payload["messages"],
         )
         if self.model_client is None and estimated >= remaining:
             raise AgentError(
@@ -183,7 +193,7 @@ class PiAttempt:
             )
         return {
             "max_tokens": min(self.output_limit, max(1, remaining - estimated)),
-            "repair_only": bool(self.repair_count),
+            "repair_only": bool(self.repair_count or self.tool_state.final_only),
         }
 
     def scripted_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -231,8 +241,8 @@ class PiAttempt:
             self.request_span = self.request_record = None
         calls = [item for item in message["content"] if item["type"] == "toolCall"]
         if calls:
-            if self.repair_count:
-                raise AgentError("invalid_decision", "引用/结构修复轮不能重新调用工具")
+            if self.repair_count or self.tool_state.final_only:
+                raise AgentError("invalid_decision", "引用修复/收尾轮不能重新调用工具")
             for call in calls:
                 if call["name"] not in self.tool_state.allowed_names:
                     raise AgentError(
@@ -240,6 +250,7 @@ class PiAttempt:
                     )
                 if not isinstance(call["arguments"], dict):
                     raise AgentError("invalid_tool_arguments", "工具参数必须是对象")
+                self.native_calls[call["id"]] = call
             decision = agent_session.parse_decision(
                 {"type": "tool_call", "tool": calls[0]["name"], "arguments": calls[0]["arguments"]}
             )
@@ -252,29 +263,57 @@ class PiAttempt:
                 )
                 if decision.type == "tool_call":
                     raise AgentError("invalid_decision", "Pi 工具调用必须使用原生 tool calls")
-                if decision.type == "final":
-                    refs = [
-                        *decision.evidence_refs,
-                        *[ref for claim in decision.claims for ref in claim.evidence],
-                    ]
-                    agent_session.validate_evidence_refs(
+                if decision.type == "final" and not (decision.task and decision.task.unresolved):
+                    agent_execution.prepare_answer(
                         self.root,
                         self.row,
-                        refs,
-                        turn_id=self.budget.turn_id,
-                        require_turn_receipts=self.tool_state.tool_names is not None
-                        and "run_readonly_sql" in self.tool_state.allowed_names,
+                        self.budget.turn_id,
+                        decision,
+                        self.tool_state.tool_names,
                     )
             except (ValueError, AgentError) as error:
                 if (
-                    self.model_client is None
-                    and self.repair_count == 0
+                    isinstance(error, AgentError)
+                    and error.code == "numeric_coverage_needs_confirmation"
+                ):
+                    decision = AgentDecision(type="ask_user", question=error.message)
+                    self.candidate = decision
+                    self.close_model_span()
+                    return {}
+                if (
+                    self.repair_count == 0
+                    and not agent_execution.answer_repair_used(self.root, self.budget.turn_id)
                     and self.budget.remaining > 0
                     and self.budget.iteration < self.budget.max_iterations
+                    and (
+                        not isinstance(error, AgentError)
+                        or agent_execution.can_repair_answer(error)
+                    )
                 ):
                     self.repair_count += 1
+                    agent_session.append_event(
+                        self.root,
+                        self.budget.session_id,
+                        "answer_repair",
+                        {"code": getattr(error, "code", "invalid_decision")},
+                        turn_id=self.budget.turn_id,
+                        attempt_id=self.budget.attempt_id,
+                    )
                     self.close_model_span()
-                    return {"repair": pi_evidence.repair_message(error, self.available_refs)}
+                    return {
+                        "repair": pi_evidence.repair_message(error, self.available_refs)
+                        + (
+                            "\n"
+                            + json.dumps(
+                                agent_execution.answer_repair_message(
+                                    self.root, self.budget.turn_id, error
+                                ),
+                                ensure_ascii=False,
+                            )
+                            if isinstance(error, AgentError)
+                            else ""
+                        )
+                    }
                 if isinstance(error, AgentError):
                     raise
                 raise AgentError("invalid_decision", "Agent 决策不是合法 JSON") from error
@@ -330,6 +369,7 @@ class PiAttempt:
         outcome = agent_execution.execute_tool(
             self.tool_state, call, self.budget.iteration, self.tool_executor
         )
+        self.native_calls.pop(call_id, None)
         if outcome.status == "success":
             self.available_refs = pi_evidence.catalog(self.root, self.budget.turn_id)
             outcome = agent_results.ToolOutcome(
@@ -342,7 +382,25 @@ class PiAttempt:
         }
 
     def message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.save_message(payload["message"])
+        message = payload["message"]
+        self.save_message(message)
+        call = self.native_calls.pop(message["toolCallId"], None)
+        if message.get("isError") and call is not None:
+            # SDK 的 schema 校验可在 beforeToolCall 前拒绝参数；也纳入公共错误/恢复计数。
+            prepared = self.pending_tools.pop(message["toolCallId"], None)
+            if prepared is None:
+                prepared = agent_execution.prepare_tool(
+                    self.tool_state, call["name"], call["arguments"]
+                )
+
+            def reject_native_arguments(*_args):
+                raise AgentError(
+                    "invalid_tool_arguments", "工具参数未通过原生校验，请按工具 schema 修改"
+                )
+
+            agent_execution.execute_tool(
+                self.tool_state, prepared, self.budget.iteration, reject_native_arguments
+            )
         return {}
 
     def lifecycle(self, payload: dict[str, Any]) -> dict[str, Any]:

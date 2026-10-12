@@ -25,6 +25,11 @@ def estimate_input_tokens(messages: list[dict[str, str]]) -> int:
 def tool_context(result: dict[str, Any], *, token_limit: int = 1500) -> str:
     """给模型的有界 JSON 投影；完整工具结果/证据回执仍由执行层处理。"""
     view = dict(result)
+    # 覆盖摘要在独立字段保留，不让长诊断说明挤掉字段目录和实际事实。
+    if isinstance(view.get("coverage_diagnostic"), dict):
+        view["coverage_diagnostic"] = {
+            key: value for key, value in view["coverage_diagnostic"].items() if key != "note"
+        }
     row_refs = {
         item["fact_id"]: item
         for item in result.get("citable_refs", [])
@@ -284,6 +289,7 @@ def compress_messages(
     messages: list[dict[str, str]],
     *,
     max_input_tokens: int | None = None,
+    working_record: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """字符阈值或剩余预算触发压缩；保留规则、问题及能容纳的最近工具交互。"""
     if sum(len(message["content"]) for message in messages) < int(MAX_CONTEXT_CHARS * 0.7) and (
@@ -304,6 +310,10 @@ def compress_messages(
     )
     # 只缩小本次请求投影，不删持久化 Scratchpad 或证据回执。
     view = dict(compressed)
+    if working_record is not None:
+        from wonder_stockresearch.interactive import agent_working_record
+
+        view["turn_working_record"] = agent_working_record.project(working_record, token_limit=700)
     recent = messages[-2:] if len(messages) > 2 else []
     while True:
         result = [
@@ -328,6 +338,11 @@ def compress_messages(
                 view[key] = view[key][1:]
                 break
         else:
+            if "turn_working_record" in view and view["turn_working_record"].get(
+                "available_input", {}
+            ).get("sample"):
+                view["turn_working_record"]["available_input"].pop("sample")
+                continue
             if len(recent) > 1:
                 recent = recent[1:]
             else:

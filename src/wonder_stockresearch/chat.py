@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -347,30 +348,101 @@ def _execute_interactive(
     question = InteractiveQuestion(
         question=plan.question or "请分析这家公司", focus=plan.focus, context="company_latest"
     )
-    result = agent.ask(
-        root,
-        plan.ticker,
-        question,
-        model=model,
-        skill_context=skill_registry.execution_context(loaded),
-        skill_audit=skill_registry.selection_audit(loaded) if loaded else None,
-        tool_names=tool_names,
-        on_progress=on_progress,
-    )
-    history = _history(row)
-    history_json = _append_history(history, "assistant", json.dumps(result, ensure_ascii=False))
-    agent_session_id = str(result.get("session_id")) if result.get("session_id") else None
+
+    def link_started(agent_session_id: str, turn_id: str) -> None:
+        _update(
+            root,
+            session_id,
+            history_json=str(_row(root, session_id)["history_json"]),
+            status="active",
+            ticker=plan.ticker,
+            last_agent_session_id=agent_session_id,
+            pending={
+                "action": "resume_interactive",
+                "agent_session_id": agent_session_id,
+                "turn_id": turn_id,
+            },
+        )
+
+    try:
+        result = agent.ask(
+            root,
+            plan.ticker,
+            question,
+            model=model,
+            skill_context=skill_registry.execution_context(loaded),
+            skill_audit=skill_registry.selection_audit(loaded) if loaded else None,
+            tool_names=tool_names,
+            on_progress=on_progress,
+            on_started=link_started,
+        )
+    except agent.AgentError as error:
+        return _interactive_failure(root, session_id, error)
+    return _store_interactive_result(root, session_id, result)
+
+
+def _store_interactive_result(
+    root: Path, session_id: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    """等待用户与完成分开保存；下一条补充必须恢复同一个 Turn。"""
+    waiting = result.get("status") == "waiting_user"
     _update(
         root,
         session_id,
-        history_json=history_json,
-        status="completed",
-        clear_pending=True,
-        ticker=plan.ticker,
+        history_json=_append_history(
+            _history(_row(root, session_id)), "assistant", json.dumps(result, ensure_ascii=False)
+        ),
+        status="waiting_user" if waiting else "completed",
+        pending={
+            "action": "respond_interactive",
+            "agent_session_id": result["session_id"],
+            "turn_id": result["turn_id"],
+        }
+        if waiting
+        else None,
+        clear_pending=not waiting,
+        ticker=result.get("ticker"),
         run_id=str(result.get("run_id")) if result.get("run_id") else None,
-        last_agent_session_id=agent_session_id,
+        last_agent_session_id=str(result["session_id"]) if result.get("session_id") else None,
     )
-    return {"session_id": session_id, "status": "completed", "result": result}
+    return {
+        "session_id": session_id,
+        "status": "waiting_user" if waiting else "completed",
+        "result": result,
+        **(
+            {
+                "question": result["question"],
+                "message": result["question"],
+                "agent_session_id": result["session_id"],
+                "turn_id": result["turn_id"],
+            }
+            if waiting
+            else {}
+        ),
+    }
+
+
+def _interactive_failure(root: Path, session_id: str, error: agent.AgentError) -> dict[str, Any]:
+    row = _row(root, session_id)
+    pending = _pending(row) or {}
+    if pending.get("agent_session_id") and pending.get("turn_id"):
+        pending["action"] = "resume_interactive"
+    pending["error"] = {"code": error.code, "message": error.message}
+    _update(
+        root,
+        session_id,
+        history_json=_append_history(_history(row), "system", error.message),
+        status="failed",
+        pending=pending,
+    )
+    return {
+        "session_id": session_id,
+        "status": "failed",
+        "agent_session_id": row.get("last_agent_session_id"),
+        "turn_id": pending.get("turn_id"),
+        "message": "交互分析暂停，已保留进度。可查看 ask-status；失败或中断的问题可在此输入重试。",
+        "issues": [{"code": error.code, "message": error.message, "severity": "error"}],
+    }
 
 
 def _execute_fixed(
@@ -664,10 +736,23 @@ def _continue_existing(
             on_progress=on_progress,
         )
     history = _history(row)
+    if pending and pending.get("action") == "respond_interactive":
+        _update(root, str(row["id"]), history_json=_append_history(history, "user", text))
+        try:
+            result = agent.respond(
+                root,
+                str(pending["agent_session_id"]),
+                str(pending["turn_id"]),
+                agent.InteractiveFollowup(question=text),
+                on_progress=on_progress,
+            )
+        except agent.AgentError as error:
+            return _interactive_failure(root, str(row["id"]), error)
+        return _store_interactive_result(root, str(row["id"]), result)
     decision = _confirmation(text) if pending else None
     if (
         pending
-        and pending.get("action") in {"resume_fixed_research", "finish"}
+        and pending.get("action") in {"resume_fixed_research", "finish", "resume_interactive"}
         and text.strip() in {"重试", "继续", "retry", "resume"}
     ):
         decision = True
@@ -684,6 +769,17 @@ def _continue_existing(
     if pending and decision is True:
         history_json = _append_history(history, "user", text)
         _update(root, str(row["id"]), history_json=history_json)
+        if pending.get("action") == "resume_interactive":
+            try:
+                result = agent.retry(
+                    root,
+                    str(pending["agent_session_id"]),
+                    str(pending["turn_id"]),
+                    on_progress=on_progress,
+                )
+            except agent.AgentError as error:
+                return _interactive_failure(root, str(row["id"]), error)
+            return _store_interactive_result(root, str(row["id"]), result)
         if pending.get("action") == "finish":
             return _finish_pending(root, str(row["id"]), row, on_progress=on_progress)
         if pending.get("action") in {"start_fixed_research", "resume_fixed_research"}:
@@ -709,15 +805,30 @@ def _continue_existing(
     if row.get("last_agent_session_id"):
         history_json = _append_history(history, "user", text)
         _update(root, str(row["id"]), history_json=history_json, status="active")
-        result = agent.followup(
-            root,
-            str(row["last_agent_session_id"]),
-            agent.InteractiveFollowup(question=text),
-            on_progress=on_progress,
-        )
-        history_json = _append_history(history, "assistant", json.dumps(result, ensure_ascii=False))
-        _update(root, str(row["id"]), history_json=history_json, status="completed")
-        return {"session_id": row["id"], "status": "completed", "result": result}
+
+        def link_started(agent_session_id: str, turn_id: str) -> None:
+            _update(
+                root,
+                str(row["id"]),
+                history_json=str(_row(root, str(row["id"]))["history_json"]),
+                pending={
+                    "action": "resume_interactive",
+                    "agent_session_id": agent_session_id,
+                    "turn_id": turn_id,
+                },
+            )
+
+        try:
+            result = agent.followup(
+                root,
+                str(row["last_agent_session_id"]),
+                agent.InteractiveFollowup(question=text),
+                on_progress=on_progress,
+                on_started=link_started,
+            )
+        except agent.AgentError as error:
+            return _interactive_failure(root, str(row["id"]), error)
+        return _store_interactive_result(root, str(row["id"]), result)
     return None
 
 
@@ -731,6 +842,69 @@ def run_once(
 ) -> dict[str, Any]:
     storage.initialize(root)
     row = _row(root, session_id) if session_id else None
+    if text.strip().casefold() in {"save", "/save", "保存"}:
+        if row is None or not row.get("last_agent_session_id") or _pending(row):
+            return {
+                "session_id": session_id,
+                "status": "failed",
+                "can_continue": row is not None,
+                "message": "请先在当前 chat 完成一次临时分析，再输入 save；恢复会话需带 --session-id。",
+                "issues": [
+                    {
+                        "code": "report_unavailable",
+                        "severity": "error",
+                        "message": "没有可保存的当前临时分析",
+                    }
+                ],
+            }
+        try:
+            saved = agent.memo_save_report(root, str(row["last_agent_session_id"]))
+        except (agent.AgentError, storage.StorageError) as error:
+            return {
+                "session_id": session_id,
+                "status": "failed",
+                "can_continue": True,
+                "message": error.message,
+                "issues": [{"code": error.code, "message": error.message, "severity": "error"}],
+            }
+        except (sqlite3.Error, OSError):
+            return {
+                "session_id": session_id,
+                "status": "failed",
+                "can_continue": True,
+                "message": "本地存储操作失败；请检查存储后再次 save，已提交的分析不会重复添加。",
+                "issues": [
+                    {
+                        "code": "memo_storage_failed",
+                        "message": "本地存储操作失败",
+                        "severity": "error",
+                    }
+                ],
+            }
+        memo = saved["memo"]
+        message = (
+            f"这次分析已在 {memo['ticker']} 公司备忘录中，没有重复添加。"
+            if saved["already_saved"]
+            else f"已加入 {memo['ticker']} 公司备忘录（版本 {memo['version']}，共 {memo['entry_count']} 条）。"
+        )
+        history = _history(row)
+        _append_history(history, "user", text)
+        _update(
+            root,
+            str(row["id"]),
+            history_json=_append_history(
+                history,
+                "assistant",
+                message,
+            ),
+        )
+        return {
+            "session_id": row["id"],
+            "status": "memo_saved",
+            "can_continue": True,
+            "message": message + f"\n文件：{root / saved['path']}",
+            "result": saved,
+        }
     if row:
         continued = _continue_existing(root, row, text, model=model, on_progress=on_progress)
         if continued is not None:

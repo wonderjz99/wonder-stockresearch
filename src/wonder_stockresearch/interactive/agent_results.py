@@ -23,6 +23,11 @@ class ToolFailure(BaseModel):
     message: str = Field(min_length=1)
     next_step_hint: str | None = None
     recoverable: bool = False
+    executed: bool | None = None
+    analysis_id: str | None = None
+    node: str | None = None
+    line: int | None = None
+    column: int | None = None
 
 
 class ToolOutcome(BaseModel):
@@ -51,6 +56,9 @@ class ToolOutcome(BaseModel):
                 "message": self.error.message,
                 "is_error": True,
                 "next_step_hint": self.error.next_step_hint or recovery_hint(self.error.code),
+                **self.error.model_dump(
+                    exclude_none=True, exclude={"code", "message", "next_step_hint", "recoverable"}
+                ),
             }
         return model_projection(view)
 
@@ -58,6 +66,8 @@ class ToolOutcome(BaseModel):
 def model_projection(result: dict[str, Any], *, token_limit: int = 1500) -> str:
     """按完整事实裁剪模型内容；结果与证据回执由执行层保留。"""
     view = dict(result)
+    if isinstance(view.get("verified_facts"), list):
+        view["verified_fact_count"] = len(view.pop("verified_facts"))
     if (
         isinstance(view.get("result"), dict)
         and "function" in view["result"]
@@ -176,7 +186,12 @@ def recovery_hint(code: str) -> str:
         )
     if code == "analysis_function_not_allowed":
         return (
-            "函数仅支持 def analyze(rows) 与允许的内置函数；不支持属性/方法调用（如 .values()/.endswith()）。"
+            "函数仅支持 def analyze(rows) 与允许的内置函数；Lambda 仅支持 sorted 的单参数 key，"
+            "读取该参数字段，可用 float/int/str；不支持外部变量和属性/方法调用（如 .values()/.endswith()）。"
             "用 rows 遍历及 row['period'] 下标；期间筛选尽量放到 SQL。保留已成功查询的 analysis_id。"
         )
+    if code == "repeated_tool_call":
+        return "本次相同请求已阻止，未重新执行。请修改代码/参数；保留成功 analysis_id，无需重复查询；无法完成则写 gaps。"
+    if code in {"analysis_tool_failures", "tool_recovery_exhausted"}:
+        return "纠正机会已用尽；用已有事实形成 final，未完成计算写 gaps，不再调用工具，不猜测计算结果。"
     return "保留已取得的事实与产物，纠正参数或缩小查询；执行失败不等于资料不存在。"

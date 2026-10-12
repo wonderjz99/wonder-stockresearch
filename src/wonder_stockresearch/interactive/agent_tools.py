@@ -211,13 +211,22 @@ def read_report(context: ToolContext, args: EmptyArgs) -> dict[str, Any]:
 
 
 def list_memos(context: ToolContext, args: EmptyArgs) -> dict[str, Any]:
+    from wonder_stockresearch.interactive import company_memo
+
     with storage.open_db(context.root) as connection:
-        memos = storage.list_company_memos(connection, context.ticker)
-    return {"ticker": context.ticker, "memos": [memo_summary(item) for item in memos]}
+        memos = company_memo.list_for_company(connection, context.ticker)
+    return {"ticker": context.ticker, "memos": memos}
 
 
 def read_memo(context: ToolContext, args: MemoReadArgs) -> dict[str, Any]:
+    from wonder_stockresearch.interactive import company_memo
+
     with storage.open_db(context.root) as connection:
+        notebook = company_memo.read(connection, str(args.memo_id))
+        if notebook is not None:
+            if notebook["ticker"] != context.ticker:
+                raise AgentError("unknown_memo", "该 Memo 不属于当前公司", exit_code=2)
+            return notebook
         memo = storage.get_company_memo(connection, str(args.memo_id))
     if memo is None or memo["ticker"] != context.ticker:
         raise AgentError("unknown_memo", "该 Memo 不属于当前公司", exit_code=2)

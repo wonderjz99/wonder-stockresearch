@@ -15,6 +15,7 @@ from wonder_stockresearch.interactive import (
     agent_policy,
     agent_session,
     agent_tools,
+    agent_working_record,
 )
 from wonder_stockresearch.interactive.agent_errors import AgentError
 
@@ -72,14 +73,24 @@ def execute(
         successful=successful,
         working_memory=context.get("scratchpad"),
     )
+    agent_execution.restore_tool_state(state)
     history = [
         agent_context.ContextMessage("user", current_question),
         agent_context.ContextMessage("background", context),
     ]
+    repair_count = int(agent_execution.answer_repair_used(root, turn_id))
     while budget.iteration < budget.max_iterations:
         if budget.remaining <= 0:
             raise AgentError("agent_budget_exhausted", "Agent 已达到 token 预算")
         iteration = budget.iteration + 1
+        if iteration == budget.max_iterations:
+            agent_execution.finish_tools(state, "last_iteration")
+        request_system = (
+            agent_policy.build_system_prompt(question.focus, [], skill_context, final_only=True)
+            + "\n当前只形成回答：使用已有事实，未完成计算写 gaps，不调用工具。"
+            if state.final_only
+            else system
+        )
         progress.emit(
             on_progress,
             "agent",
@@ -102,7 +113,7 @@ def execute(
             output_reserve = min(1024, max(64, remaining // 4))
             planned_calls = min(3, budget.max_iterations - iteration + 1)
             fixed_input = agent_memory.estimate_input_tokens(
-                [{"content": system}, {"content": current_question}]
+                [{"content": request_system}, {"content": current_question}]
             )
             latest = next((item for item in reversed(history) if item.kind == "tool_result"), None)
             result_reserve = (
@@ -116,7 +127,11 @@ def execute(
                 )
             )
             input_ceiling = min(
-                agent_model.MAX_AGENT_INPUT_TOKENS,
+                int(
+                    json.loads(turn["budget_json"]).get(
+                        "input_token_limit", agent_model.MAX_AGENT_INPUT_TOKENS
+                    )
+                ),
                 max(agent_model.AGENT_INPUT_TARGET_TOKENS, fixed_input + result_reserve + 428),
             )
             target = min(
@@ -129,12 +144,15 @@ def execute(
                 session_id,
                 current_question,
                 agent_context.convert_to_llm(
-                    system,
-                    agent_context.transform_context(history, state.working_memory),
+                    request_system,
+                    agent_context.transform_context(
+                        history, agent_working_record.project(state.working_memory or {})
+                    ),
                     max_input_tokens=max(0, target),
                     remaining_iterations=budget.max_iterations - iteration + 1,
                 ),
                 max_input_tokens=max(0, target),
+                working_record=state.working_memory,
             )
             request_budget = agent_model.remaining_request_tokens.set(budget.reserve())
             try:
@@ -146,7 +164,35 @@ def execute(
             finally:
                 agent_model.remaining_request_tokens.reset(request_budget)
             budget.settle(consumed)
-            decision = agent_session.parse_decision(payload)
+            try:
+                decision = agent_session.parse_decision(payload)
+            except AgentError as error:
+                if (
+                    repair_count
+                    or budget.remaining <= 0
+                    or budget.iteration >= budget.max_iterations
+                ):
+                    raise
+                repair_count += 1
+                agent_session.append_event(
+                    root,
+                    session_id,
+                    "answer_repair",
+                    {"code": error.code},
+                    turn_id=turn_id,
+                    attempt_id=attempt_id,
+                )
+                history.append(
+                    agent_context.ContextMessage(
+                        "tool_error",
+                        {
+                            "code": error.code,
+                            "message": error.message,
+                            "next_step_hint": "按决策 schema 修正 JSON；不要重跑已成功工具。",
+                        },
+                    )
+                )
+                continue
             history.append(
                 agent_context.ContextMessage("assistant", decision.model_dump(mode="json"))
             )
@@ -168,9 +214,32 @@ def execute(
             attempt_id=attempt_id,
         )
         if decision.type in {"final", "ask_user"}:
-            return agent_execution.accept_answer(
-                root, row, budget, decision, current_question, tool_names, on_progress
-            )
+            try:
+                return agent_execution.accept_answer(
+                    root, row, budget, decision, current_question, tool_names, on_progress
+                )
+            except AgentError as error:
+                if (
+                    not agent_execution.can_repair_answer(error)
+                    or repair_count
+                    or budget.iteration >= budget.max_iterations
+                ):
+                    raise
+                repair_count += 1
+                agent_session.append_event(
+                    root,
+                    session_id,
+                    "answer_repair",
+                    {"code": error.code},
+                    turn_id=turn_id,
+                    attempt_id=attempt_id,
+                )
+                history.append(
+                    agent_context.ContextMessage(
+                        "tool_error", agent_execution.answer_repair_message(root, turn_id, error)
+                    )
+                )
+                continue
         call = agent_execution.prepare_tool(state, str(decision.tool), decision.arguments)
         progress.emit(
             on_progress,

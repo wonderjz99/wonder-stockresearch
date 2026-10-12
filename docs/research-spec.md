@@ -1,5 +1,7 @@
 # 公司研究规格 v1
 
+本文件是现行研究方法契约；实现/预算见 [技术规格](technical-spec.md)，待办见 [PLAN](../PLAN.md)，历史原因见 [决策索引](decisions.md)。本次文档整理不改变下列问题、评分与证据语义。
+
 这是 wonder-stockresearch 的自足业务契约。参考 moat Standard 公司分析框架，以中文重新组织；框架出处见 [provenance.md](provenance.md)。不需要访问旧项目才能实施。
 
 ## 1. 范围与报告命名

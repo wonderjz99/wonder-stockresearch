@@ -34,6 +34,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/wonder_stockresearch"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills/question-clarification" = "wonder_stockresearch/resources/skills/question-clarification"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

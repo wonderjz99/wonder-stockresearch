@@ -1,5 +1,11 @@
 # 框架出处与设计依据
 
+2026-10-11 澄清与数值回答阶段复核下列 Dexter 主循环、注册表和 scratchpad 源码，只沿用有限执行、方法元数据和工作记录思路。question-clarification、期间确认、事实身份绑定、Decimal 渲染和回执校验由本项目实现。受用户所说 grillme 的“先问清楚”启发，未复制其 Skill 或新增 Agent；编写使用本机 skill-creator 方法，真实模型 Skill A/B 未运行。见 [本阶段教学](40-question-clarification-and-numeric-answers.md)。
+
+2026-10-11 公司主备忘录/save 阶段沿用并复核下文 Dexter 主循环、工具/Skill 注册和 scratchpad 的边界。主备忘录唯一性、原报告确定性保存、迁移和版本规则为本项目自行实现；保存入口在 Python CLI/chat，未向 Agent 增加写工具或采用外部记忆服务，见 [本阶段教学](38-company-memo-save.md)。
+
+2026-10-11 字段检索/工作清单/错误恢复阶段重新核对用户指定 Dexter 的 [Agent loop](https://github.com/virattt/dexter/blob/main/src/agent/agent.ts)、[工具注册](https://github.com/virattt/dexter/blob/main/src/tools/registry.ts)、[Skill 注册](https://github.com/virattt/dexter/blob/main/src/skills/registry.ts) 和 [scratchpad](https://github.com/virattt/dexter/blob/main/src/agent/scratchpad.ts)。继续参考工具记录与有限循环的分离；Turn 权威清单、一次重复纠正反馈、受限 Lambda、引用与预算恢复由本项目 Python 实现，不复制其工具权限或宣称同等模型效果。实际改编见 [本阶段教学](37-agent-query-and-recovery.md)。
+
 ## 公司研究框架
 
 本版研究问题、门闸与维度依据用户既有 eco-moat-ai Standard 框架的概念整理。交接阶段核对了旧项目中该 skill 的公司问题、门闸和 M1–M6；本项目的中文研究规格是重新组织的需求说明，不复制旧版可执行 skill、不携带股东信、全文案例或代码。
@@ -51,3 +57,7 @@
 2026-10-10 经用户分别确认：Python 按 fixed/interactive/interactive.pi 分包，共用计算独立；仅项目 Pi 包装源码迁至 `pi_runtime/src/runner.ts`，SDK 的 Agent/消息/工具/流类型参与 strict 检查，构建后的 runner.mjs 随包发布。开发依赖 TypeScript 7.0.2、Node 类型 22.20.5 已锁定；不是将领域代码改写成上游实现，也未引入 coding-agent/Harness。实际 beforeToolCall/afterToolCall/subscribe/transformContext/followUp 复用及边界见 [执行架构](35-agent-execution-architecture.md)。
 
 同日可靠性修复再次核对上述Dexter主循环、工具/Skill注册和Scratchpad，参考其工具结果有界化与工作记录思路。当前Turn分页续查、紧凑引用回执、无工具的定向修复和预算快照均为本项目实现；没有复制上游开放权限或引入新模型审查Agent。离线结果见[可靠性说明](32-pi-agent-reliability.md)。
+
+## AI开发流程方法（2026-10-12）
+
+参考GitHub Spec Kit的需求到验收流程、OpenSpec的现行规格/变更/历史分离、Kiro按复杂度组织需求/设计/任务、OpenAI简洁AGENTS与验证约定，以及Anthropic的Agent结果评测。具体一手链接、取舍与适配范围见 [开发流程第7节](development-workflow.md#7-参考了什么如何适配)。未安装这些工具或复制其实现，未新增付费judge或外部权限。当前产品技术栈以technical-spec为准；本文其他日期条目保留当时的来源核对记录。

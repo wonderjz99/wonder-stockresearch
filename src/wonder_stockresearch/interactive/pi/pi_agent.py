@@ -71,6 +71,7 @@ def execute(
         question=current_question,
         successful=successful,
     )
+    agent_execution.restore_tool_state(state)
     adapter = PiAttempt(
         root,
         row,

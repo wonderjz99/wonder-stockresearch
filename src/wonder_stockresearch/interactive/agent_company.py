@@ -235,6 +235,9 @@ def facts(root: Path, row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 _SEARCH_ALIASES = (
+    ("total assets", "总资产", "资产总额", "资产合计", "资产总计"),
+    ("total liabilities", "总负债", "负债总额", "负债合计", "负债总计"),
+    ("cash and cash equivalents", "现金及等价物", "现金及现金等价物", "现金余额", "现金资产"),
     ("revenue", "营业收入", "营收", "收入"),
     ("net profit", "净利润"),
     ("gross margin", "毛利率"),
@@ -253,9 +256,32 @@ def search_terms(query: str) -> set[str]:
     normalized = query.casefold().strip()
     terms = set(normalized.split())
     for group in _SEARCH_ALIASES:
+        if normalized in group:
+            return set(group)
+    for group in _SEARCH_ALIASES:
         if any(term in normalized for term in group):
             terms.update(group)
     return terms
+
+
+def match_rank(item: dict, terms: set[str]) -> int:
+    """别名只提高候选排序；同比、比例与原值仍保持独立身份。"""
+    label = item["label"].casefold().strip()
+    if label in terms:
+        return 0
+    if any(label.startswith(term) for term in terms):
+        return 1
+    return 2
+
+
+def coverage_summary(data: dict, dataset: str | None = None) -> dict:
+    rows = [f for f in data["financial_facts"] if dataset is None or f.get("dataset") == dataset]
+    return {
+        "available_period_kinds": sorted({f["period_kind"] for f in rows if f.get("period_kind")}),
+        "earliest_period": min((str(f["period"]) for f in rows if f.get("period")), default=None),
+        "latest_period": max((str(f["period"]) for f in rows if f.get("period")), default=None),
+        "note": "仅描述本 Turn 授权归档的已解析覆盖；期末不证明披露时间，未取得不证明公司未披露。",
+    }
 
 
 def query(
@@ -278,6 +304,11 @@ def query(
             "company_scope_required", "该工具需要 context=company_latest 的新问题", exit_code=2
         )
     terms = search_terms(query)
+    coverage_info = coverage_summary(data, dataset)
+    coverage_info["requested_period_kind"] = period_kind
+    coverage_info["period_kind_unavailable"] = bool(
+        period_kind and period_kind not in coverage_info["available_period_kinds"]
+    )
     records = []
     catalog: dict[tuple, dict[str, Any]] = {}
     items = sorted(
@@ -323,14 +354,33 @@ def query(
             if item.get("period") is not None and item["period"] not in entry["periods"]:
                 entry["periods"].append(item["period"])
             entry["fact_count"] += 1
+    for record in catalog.values():
+        periods_found = record["periods"]
+        if mode == "fields" or len(periods_found) > 5:
+            record["period_count"] = len(periods_found)
+            record["latest_period"] = periods_found[0] if periods_found else None
+            record["earliest_period"] = periods_found[-1] if periods_found else None
+            record["periods_omitted"] = max(0, len(periods_found) - 5)
+            record["periods"] = periods_found[:5]
     if mode == "fields":
         records = list(catalog.values())
+    if terms:
+        records.sort(
+            key=lambda item: (match_rank(item, terms), item["field_key"].endswith((":yoy", ":qoq")))
+        )
+    catalog_records = sorted(
+        catalog.values(),
+        key=lambda item: (
+            match_rank(item, terms) if terms else 0,
+            item["field_key"].endswith((":yoy", ":qoq")),
+        ),
+    )
     coverage = [item for item in data["coverage"] if dataset is None or item["dataset"] == dataset]
     navigation = (
         {}
         if mode == "fields"
         else {
-            "field_catalog": list(catalog.values())[:8],
+            "field_catalog": catalog_records[:8],
             "field_catalog_omitted": max(0, len(catalog) - 8),
         }
     )
@@ -339,6 +389,7 @@ def query(
     return {
         "scope": "company_latest",
         "coverage": coverage,
+        "coverage_diagnostic": coverage_info,
         "mode": mode,
         **navigation,
         "records": page,

@@ -1,5 +1,13 @@
 # 阶段 8–10、18：独立交互 Agent、记忆、临时报告与受限计算
 
+> 本文保留阶段设计与讲解；截至2026-10-12的现行契约以[技术规格](technical-spec.md)为准，当前待办/实际状态见[PLAN](../PLAN.md)与[PROGRESS](../PROGRESS.md)，不以旧阶段限制覆盖当前规则。
+
+2026-10-11 五题通用修复覆盖下文历史提交规则：新 Turn 冻结分析时钟及无权限澄清方法哈希，ask/chat 共用接入；已知必要时间歧义先 waiting_user，补充沿用原 Turn/预算。最终 numeric_blocks 指向本 Turn 成功 SQL 原事实，程序核对口径/期间/回执并用 Decimal 生成表和变化，正文不再平行抄数字/趋势。已有数值输入不能因函数失败声称没有计算器；可纠正提交错误预算内最多一次，已知同范围季度缺口阻止等价空查。chat 保留补充与后续失败关联。历史 Turn 不升级契约、报告不重写；详见 [问题澄清与数值回答](40-question-clarification-and-numeric-answers.md)。
+
+2026-10-11 公司 Memo 更新：每家公司一个主备忘录；临时分析完成后 chat `save` 或无 JSON 的 `memo-save` 确定性追加原报告，同一报告快捷保存幂等。schema v14 保留旧条目和版本，memo-list 返回主入口，memo-read 支持 ticker/主 ID/旧条目 ID 和主历史版本。快捷保存允许保留无引用的缺口说明，手工 MemoRequest 仍要求引用。详见 [公司备忘录与 save](38-company-memo-save.md)。
+
+2026-10-11 更新覆盖下文历史恢复规则：两种运行时共享 Turn 事件生成的字段/输入/错误/待办清单；字段位置未知先跨授权数据集定位。受限计算允许简单 sorted key Lambda；重复已失败调用先阻止执行并提供一次纠正反馈，累计三次可恢复错误或重复纠正机会用尽后预算内无工具收尾，重试不清零。chat 执行前保存 Agent Session/Turn 关联。实际规则和离线验证见 [字段检索与恢复](37-agent-query-and-recovery.md)。
+
 2026-10-09 更新：用户已批准 Python 领域核心 + 项目自带 Pi SDK 问答运行时。Pi 路径已实现并在验收，默认切换须待质量门槛通过；安装、职责和已知限制见 [Pi 运行时](30-pi-agent-runtime.md)。本更新覆盖下文历史阶段中的“暂不引入 Pi runtime”限制。
 
 同日修复后的新问题默认预算为 60,000 tokens／10 轮，覆盖下文历史默认；旧 Turn 不变。Pi 有界上下文、查询分页、工作记录与紧凑引用说明见 [可靠性修复](32-pi-agent-reliability.md)，thinking 暂不开启。
@@ -35,11 +43,11 @@
 
 ### CompanyMemo
 
-用户明确选择保存的公司长期观察，保存在 `company_memos`：
+用户明确选择保存的公司长期观察，主入口保存在 `company_notebooks`，不可变条目仍在 `company_memos`：
 
-- 由 `memo-save` 显式创建。
-- 必须带至少一个 `source_id + locator`。
-- 同标题再次保存会生成新版本，不静默覆盖旧 Memo。
+- 由 `memo-save` 或 chat `save` 显式保存，每个 ticker 只有一个主备忘录。
+- 快捷保存复制原报告全部引用、反方和缺口；无引用时明确标记，不伪造来源。手工 MemoRequest 至少带一个 `source_id + locator`。
+- 按问题追加并保留历史；快捷保存同报告不重复，手工同标题仍保留条目标题版本。
 - 可以被之后的 Agent 读取。
 - 默认不能改变正式报告、门闸或护城河分数。
 

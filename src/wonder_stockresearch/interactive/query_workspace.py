@@ -21,7 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 from wonder_stockresearch import financial_calculations, storage
-from wonder_stockresearch.interactive import agent_company
+from wonder_stockresearch.interactive import agent_company, numeric_answer
 from wonder_stockresearch.models import Source
 
 MAX_FACTS = 10_000
@@ -46,10 +46,22 @@ _FORBIDDEN_SQL_TOKENS = re.compile(
 class QueryWorkspaceError(Exception):
     """可安全回送给 Agent 的 QueryWorkspace 错误。"""
 
-    def __init__(self, code: str, message: str, *, exit_code: int = 2) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        exit_code: int = 2,
+        node: str | None = None,
+        line: int | None = None,
+        column: int | None = None,
+    ) -> None:
         self.code = code
         self.message = message
         self.exit_code = exit_code
+        self.node = node
+        self.line = line
+        self.column = column
         super().__init__(message)
 
 
@@ -270,6 +282,7 @@ def _snapshot_schema(snapshot: dict[str, Any]) -> dict[str, Any]:
             tables=_COMPANY_COLUMNS,
             profile_count=len(snapshot["company_profile_facts"]),
             coverage=snapshot["coverage"],
+            coverage_diagnostic=agent_company.coverage_summary(snapshot),
         )
         result["rules"].extend(
             [
@@ -634,7 +647,17 @@ def run_readonly_sql(root: Path, row: dict[str, Any], turn_id: str, sql: str) ->
             "row_count": len(rows),
             "citable": bool(refs),
             "citable_refs": refs,
+            "verified_facts": numeric_answer.verified_facts(_snapshot, rows),
         }
+        result["numeric_submission"] = numeric_answer.summary(result["verified_facts"])
+        result["coverage_diagnostic"] = agent_company.coverage_summary(_snapshot)
+        requested_kind = re.search(r"\bperiod_kind\s*=\s*'([^']+)'", sql, re.IGNORECASE)
+        if requested_kind:
+            result["coverage_diagnostic"]["requested_period_kind"] = requested_kind.group(1)
+            result["coverage_diagnostic"]["period_kind_unavailable"] = (
+                requested_kind.group(1)
+                not in result["coverage_diagnostic"]["available_period_kinds"]
+            )
         rendered = json.dumps(result, ensure_ascii=False, allow_nan=False, default=str)
         if len(rendered.encode("utf-8")) > MAX_OUTPUT_BYTES:
             raise QueryWorkspaceError("analysis_output_too_large", "SQL 结果超过 64 KB 限制")
@@ -740,6 +763,100 @@ _ALLOWED_FUNCTION_CALLS = {
     "sum",
 }
 
+FUNCTION_GUIDANCE = (
+    "函数签名 def analyze(rows)，返回 JSON 对象。允许 for/if、推导式、下标及 "
+    + "/".join(sorted(_ALLOWED_FUNCTION_CALLS))
+    + "；Lambda 仅允许用于 sorted(..., key=lambda row: ...)：单参数，读取该参数字段，"
+    "可用基础运算、元组及 float/int/str 转换，不捕获外部变量。"
+    "禁止 import、属性/方法、辅助函数、文件、网络和动态执行。"
+)
+
+
+def _reject_node(node: ast.AST, message: str) -> None:
+    line = getattr(node, "lineno", None)
+    column = getattr(node, "col_offset", None)
+    raise QueryWorkspaceError(
+        "analysis_function_not_allowed",
+        f"{message}（第 {line} 行，第 {column + 1 if column is not None else '?'} 列）",
+        node=type(node).__name__,
+        line=line,
+        column=column + 1 if column is not None else None,
+    )
+
+
+def _validate_sort_key(node: ast.Lambda, parent: ast.AST | None, parents: dict) -> None:
+    call = parents.get(parent)
+    if not (
+        isinstance(parent, ast.keyword)
+        and parent.arg == "key"
+        and isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "sorted"
+    ):
+        _reject_node(node, "Lambda 只能作为 sorted 的 key")
+    args = node.args
+    if (
+        len(args.posonlyargs) + len(args.args) != 1
+        or args.defaults
+        or args.vararg
+        or args.kwarg
+        or args.kwonlyargs
+    ):
+        _reject_node(node, "排序 Lambda 必须只有一个普通参数且没有默认值")
+    name = [*args.posonlyargs, *args.args][0].arg
+    if name.startswith("_") or name in _ALLOWED_FUNCTION_CALLS:
+        _reject_node(node, "Lambda 参数不能遮蔽保留名称")
+    allowed = {
+        ast.Name,
+        ast.Load,
+        ast.Constant,
+        ast.Subscript,
+        ast.Tuple,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Compare,
+        ast.BoolOp,
+        ast.Call,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.FloorDiv,
+        ast.Mod,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+        ast.Not,
+        ast.And,
+        ast.Or,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+        ast.In,
+        ast.NotIn,
+    }
+    for child in ast.walk(node.body):
+        if type(child) not in allowed:
+            _reject_node(child, "排序 Lambda 只支持字段、常量、元组及基础运算")
+        if isinstance(child, ast.Name) and child.id != name:
+            enclosing = parents.get(child)
+            if not (
+                child.id in {"float", "int", "str"}
+                and isinstance(enclosing, ast.Call)
+                and enclosing.func is child
+            ):
+                _reject_node(child, "排序 Lambda 不允许引用外部变量")
+        if isinstance(child, ast.Call) and not (
+            isinstance(child.func, ast.Name)
+            and child.func.id in {"float", "int", "str"}
+            and len(child.args) == 1
+            and not child.keywords
+        ):
+            _reject_node(child, "排序 Lambda 只允许 float/int/str 单参数转换")
+
 
 def _assignment_target_is_allowed(target: ast.expr) -> bool:
     if isinstance(target, (ast.Tuple, ast.List)):
@@ -771,6 +888,10 @@ def validate_function(code: str) -> None:
         or function.args.vararg is not None
         or function.args.kwarg is not None
         or function.args.kwonlyargs
+        or function.args.posonlyargs
+        or function.args.defaults
+        or any(argument.annotation is not None for argument in function.args.args)
+        or function.returns
     ):
         raise QueryWorkspaceError(
             "analysis_function_not_allowed", "函数签名必须是 def analyze(rows)"
@@ -779,42 +900,56 @@ def validate_function(code: str) -> None:
         raise QueryWorkspaceError(
             "analysis_function_result_missing", "临时函数必须 return JSON 对象"
         )
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(tree):
-        if type(node) not in _ALLOWED_FUNCTION_NODES:
-            raise QueryWorkspaceError(
-                "analysis_function_not_allowed", f"不允许的 Python 语法：{type(node).__name__}"
-            )
+        if isinstance(node, ast.Lambda):
+            _validate_sort_key(node, parents.get(node), parents)
+        elif type(node) not in _ALLOWED_FUNCTION_NODES:
+            _reject_node(node, f"不允许的 Python 语法：{type(node).__name__}")
         if isinstance(node, ast.Attribute):
-            raise QueryWorkspaceError("analysis_function_not_allowed", "不允许属性访问")
+            _reject_node(node, "不允许属性访问")
         if isinstance(node, ast.Name) and (node.id.startswith("_") or "__" in node.id):
-            raise QueryWorkspaceError("analysis_function_not_allowed", "不允许 dunder 名称")
+            _reject_node(node, "不允许 dunder 名称")
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and (node.id in _ALLOWED_FUNCTION_CALLS or node.id in {"analyze", "rows"})
+        ):
+            _reject_node(node, "不能重新赋值内置函数或输入名称")
         if isinstance(node, ast.FunctionDef) and node is not function:
-            raise QueryWorkspaceError("analysis_function_not_allowed", "不允许嵌套函数或递归")
+            _reject_node(node, "不允许嵌套函数或递归")
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if not all(_assignment_target_is_allowed(target) for target in targets):
-                raise QueryWorkspaceError(
-                    "analysis_function_not_allowed", "赋值目标只能是局部变量或字典项"
-                )
+                _reject_node(node, "赋值目标只能是局部变量或字典项")
         if isinstance(node, ast.For) and not _assignment_target_is_allowed(node.target):
-            raise QueryWorkspaceError("analysis_function_not_allowed", "for 循环目标只能是局部变量")
+            _reject_node(node, "for 循环目标只能是局部变量")
         if isinstance(node, ast.comprehension) and (
             node.is_async or not _assignment_target_is_allowed(node.target)
         ):
-            raise QueryWorkspaceError("analysis_function_not_allowed", "推导式只能同步遍历受限数据")
+            _reject_node(node, "推导式只能同步遍历受限数据")
         if isinstance(node, ast.Call) and (
             not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCTION_CALLS
         ):
-            raise QueryWorkspaceError("analysis_function_not_allowed", "函数调用不在受控白名单中")
+            name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else type(node.func).__name__
+            )
+            _reject_node(
+                node,
+                f"不允许调用 {name[:50]}；允许函数：{', '.join(sorted(_ALLOWED_FUNCTION_CALLS))}。方法/统计库请改用 SQL 或 sum/len 等基础运算",
+            )
 
 
 _FUNCTION_RUNNER = r"""
 import ast, json, sys
 
 payload = json.loads(sys.stdin.read())
-scope = {"__builtins__": {}, "abs": abs, "enumerate": enumerate, "float": float,
-         "int": int, "len": len, "max": max, "min": min, "range": range,
-         "round": round, "sorted": sorted, "str": str, "sum": sum}
+scope = {"__builtins__": {}}
+scope.update({name: getattr(__import__('builtins'), name) for name in payload['allowed_calls']})
 exec(compile(ast.parse(payload["code"], mode="exec"), "<analysis>", "exec"), scope, scope)
 result = scope["analyze"](payload["rows"])
 if not isinstance(result, dict):
@@ -908,10 +1043,18 @@ def run_analysis_function(
     code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
     storage.write_atomic(workspace / "function.py", code)
     (workspace / "function.py").chmod(0o444)
+    # 执行前占用实际函数额度；失败/硬中断不能通过新 Attempt 获得免费执行。
+    with storage.project_lock(root), storage.open_db(root) as connection:
+        connection.execute(
+            "UPDATE analysis_runs SET code_hash = ? WHERE id = ?", (code_hash, analysis_id)
+        )
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-S", "-c", _FUNCTION_RUNNER],
-            input=json.dumps({"code": code, "rows": rows}, ensure_ascii=False),
+            input=json.dumps(
+                {"code": code, "rows": rows, "allowed_calls": sorted(_ALLOWED_FUNCTION_CALLS)},
+                ensure_ascii=False,
+            ),
             text=True,
             capture_output=True,
             cwd=workspace,

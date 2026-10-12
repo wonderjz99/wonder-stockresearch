@@ -43,6 +43,7 @@ def build_system_prompt(
     skill_context: str = "",
     *,
     native_tools: bool = False,
+    final_only: bool = False,
 ) -> str:
     """将固定权限策略、当轮工具 schema 与方法 Skill 组合为 system prompt。
 
@@ -51,17 +52,22 @@ def build_system_prompt(
     """
     tool_ids = {str(item["name"]) for item in tools}
     calculation_guidance = (
-        "数值问题先检索归档。run_trusted_calculation 仅是所列 metric 的快捷方式，不限制可回答的指标。"
-        "其他运算使用获准的 SQL/函数，不心算或猜测。先筛选最小数据、去重并核对期间与单位；"
-        "SQL 返回 fact_id 以保留引用，取得 analysis_id 后可调用 run_analysis_function 编写计算。"
-        "只调用当前工具集合实际提供的工具；不要重复已成功的相同查询。"
-        if "run_trusted_calculation" in tool_ids
-        else "当前工具集合不含可信计算能力；不要尝试调用未提供的工具，数值缺口要明确说明。"
+        "数值问题先检索；固定计算器仅是快捷方式，不限制可回答的指标，其他指标用获准 SQL/函数。"
+        "SQL 保留 fact_id，取得 analysis_id 后计算；复用成功查询。"
+        if tool_ids
+        & {
+            "run_trusted_calculation",
+            "run_readonly_sql",
+            "run_analysis_function",
+            "run_analysis_code",
+        }
+        else "本轮未提供计算工具；这不代表整个系统缺少计算能力。说明本题的授权/停止状态与未完成步骤。"
     )
+    if final_only:
+        calculation_guidance = "此前获准的计算能力仍存在，但本轮已停止新工具调用。复用成功产物；未成功的计算写缺口，不声称系统没有计算器。"
     if "fetch_financial_data" in tool_ids:
         calculation_guidance += (
-            "归档缺少原始指标或期间时调用 fetch_financial_data 补取富途财务资料，再检索/计算；"
-            "不要把固定计算器没有某个 metric 误判为数据不存在。接口失败或仍缺数据才说明缺口。"
+            "缺原始指标/期间才 fetch_financial_data；固定计算器没有 metric 不代表资料缺失。"
         )
     prompt = (
         _INVARIANT_POLICY
@@ -79,39 +85,24 @@ def build_system_prompt(
             else f"可用工具：{json.dumps(tools, ensure_ascii=False, separators=(',', ':'))}"
         )
     )
-    prompt += "\n单位、数量级、币种或期间未知时保留未知；不得把无单位数值擅自写成百分比、元或亿元。"
+    prompt += (
+        '\n数值用 final.numeric_blocks=[{"analysis_id":"成功SQL的ID","operations":["values","mean","range","population_stddev","changes"]}]，'
+        "Python 按原始 fact_id 计算/渲染，无需为这些运算写函数。answer/claims 不重复数值或数值趋势。"
+        'task 可附 {"periods":[],"unresolved":[]}，必要未知项用 ask_user 先问。'
+        "\n单位/倍率/币种未知保持未知，不补 % 或百分点；财年期末不是披露日。"
+        "数字及趋势须绑定成功产物的 period/value/引用，不心算。失败按具体错误纠正，"
+        "复用成功 analysis_id，不原样重试。工作清单样本省略不是缺失；引用须本 Turn 回执。"
+        "无工具收尾用已核实事实，未完成部分写 gaps。"
+    )
+    if "query_company_data" in tool_ids:
+        prompt += (
+            "\n指标位置未知先 fields/query，省略 dataset 跨授权数据集定位；已知 field_keys/用户限定范围可直接查。"
+            "需要事实就实际查询，不把工具步骤留给用户。"
+        )
     if native_tools:
         prompt += (
             '\nPi 引用也可用 {"ref_id":"工具实际返回的 ref_id","relation":"supports"}，'
-            "Python 会展开并继续验证本 Turn 回执。claims 已含引用时 evidence_refs 可留空，避免重复长定位。"
-            "query_company_data 支持 field_keys、periods、period_kind 与 offset；"
-            "先目录定位准确字段，再取完整所需期间。工作记录 sample/截断只是展示，不代表资料缺失。"
-            "计算函数请返回样本 period/value、样本数、公式结果及比较所需的差值/最小最大值；"
-            "涉及区间关系时一并用程序比较是否包含/重叠，不从均值差推断区间关系。"
-        )
-        prompt += (
-            "\n用户已授权当前工具集合。事实或数值问题必须先实际检索，不得仅凭来源摘要声称没有数据；"
-            "下一步应执行的查询请直接用原生工具调用完成，不要把调用步骤留给用户。"
-            "辅助上下文不能替代本 Turn 的工具证据。拒绝越权写报告的请求可直接回答。"
-        )
-        prompt += (
-            "\n回答逐年数值时必须把每一行 period 与该行 value 一起引用，不可把降序查询的值配给升序年份。"
-            "unit/scale 为 null 时只能称为原始数值或原始值平均；即使字段名称含毛利率，"
-            "也禁止写 %、百分比或百分点，禁止依据通常口径补单位。"
-            "不要把财年结束时间等同于披露时间；已报告与完整期间应分别核对。"
-        )
-        prompt += (
-            "\n同比、合计、占比、倍数、极差、标准差等任何派生数值，必须来自成功的计算工具或 SQL 表达式，"
-            "SQL 仅返回原始行并不等于完成计算，禁止随后心算。函数结果应返回 period/value 对象，"
-            "不能仅返回排序后的 values 数组再自行猜测期间。函数不支持 endswith、values、items 等属性调用，"
-            "请在 SQL 里按 field_key/period 筛选，再对 rows 直接计算。"
-            "查询或计算失败只说明此次执行失败，不能声称资料不存在；有剩余轮次应缩小查询或纠正代码。"
-        )
-        prompt += (
-            "\n原始指标单位未知禁止自行添加单位；同一字段、同一倍率的两期数值若做同比，单位可约去，"
-            "但必须用计算工具返回增长比值与乘100的结果，再表述百分比。"
-            "公司概况 facts 请按公司名称、注册办事处、总办事处、公司业务等具体字段检索；"
-            "财务字段名称常为中文，英文 revenue/profit 查询为空时改查中文目录，不要宣称不存在。"
+            "Python 展开后验证本 Turn 回执；claims 已含引用时 evidence_refs 可留空。"
         )
     if skill_context:
         prompt += (

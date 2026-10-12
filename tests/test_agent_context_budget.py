@@ -51,7 +51,7 @@ def test_chat_with_project_skills_and_large_history_reaches_api(
                 content_hash=str(i),
                 created_at=storage.now_utc(),
             )
-    question = "中国移动最近三年毛利率平均值"
+    question = "中国移动2023–2025年毛利率平均值"
     plan = {
         "intent": "interactive_question",
         "ticker": "HK.00941",

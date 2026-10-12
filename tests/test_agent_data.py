@@ -93,8 +93,9 @@ def test_missing_metric_fetches_then_model_writes_calculation_with_receipts(
         ]
         return {
             "type": "final",
-            "answer": "两个完整财年平均为 110。",
-            "claims": [{"text": "平均为 110。", "evidence": refs}],
+            "answer": "按已取得的原值计算如下。",
+            "claims": [{"text": "使用本次归档输入。", "evidence": refs}],
+            "numeric_blocks": [{"analysis_id": result["analysis_id"], "operations": ["mean"]}],
             "evidence_refs": [],
             "counterarguments": [],
             "gaps": [],
@@ -105,7 +106,7 @@ def test_missing_metric_fetches_then_model_writes_calculation_with_receipts(
     result = agent.ask(
         root,
         "SYNTHETIC",
-        InteractiveQuestion(question="自定义经营指标两年平均", run_id=run_id),
+        InteractiveQuestion(question="自定义经营指标2024–2025年平均", run_id=run_id),
         tool_names=[
             "query_archived_financials",
             "fetch_financial_data",

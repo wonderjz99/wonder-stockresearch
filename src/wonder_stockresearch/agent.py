@@ -1,7 +1,7 @@
 """受限的交互式公司研究 Agent。
 
 交互 Agent 与正式 ResearchRun 分离：读取归档并按权限补取只读财务资料，输出临时
-InteractiveReport；只有用户明确调用 memo-save 才会产生公司 Memo。
+InteractiveReport；只有用户明确调用 memo-save/chat save 才会产生公司 Memo。
 本模块不执行 collect、source-add、save-draft 或 finish。
 """
 
@@ -10,9 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
+
+from pydantic import ValidationError
 
 from wonder_stockresearch import model_request, observability, progress, skill_registry, storage
 from wonder_stockresearch.fixed import research
@@ -24,14 +28,20 @@ from wonder_stockresearch.interactive import (
     agent_runtime,
     agent_session,
     agent_tools,
+    agent_working_record,
+    company_memo,
+    question_requirements,
     tool_registry,
 )
 from wonder_stockresearch.interactive.agent_errors import AgentError
 
 from .models import (
+    AgentDecision,
     CompanyMemo,
+    EvidenceRef,
     InteractiveFollowup,
     InteractiveQuestion,
+    InteractiveReport,
     MemoRequest,
     source_id_text,
 )
@@ -96,10 +106,18 @@ def _insert_turn(
     max_iterations: int,
     token_budget: int,
     created_at: Any,
+    root: Path | None = None,
 ) -> None:
     """固化 QueryWorkspace 所需的用户问题、授权和预算；不承担 19D Attempt 语义。"""
     payload = json.loads(question_json)
     payload["_agent_runtime"] = "pi-v1" if _pi_enabled() else "legacy"
+    payload["_quality_version"] = 1
+    analysis_time = datetime.fromisoformat(payload["as_of"]) if payload.get("as_of") else created_at
+    payload["_analysis_clock"] = question_requirements.freeze_clock(analysis_time)
+    if root is not None:
+        payload["_question_skill"] = skill_registry.selection_audit(
+            question_requirements.load_method(root)
+        )
     if payload.get("context") == "company_latest":
         payload["_company_scope"] = agent_company.freeze(connection, ticker, run_id)
     question_json = json.dumps(payload, ensure_ascii=False)
@@ -199,11 +217,42 @@ def _execute_session(
     skill_context: str = "",
     tool_names: list[str] | tuple[str, ...] | None = None,
     on_progress: progress.ProgressCallback | None = None,
+    on_started: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     with storage.agent_execution_lock(root, session_id):
         try:
+            if on_started is not None:
+                on_started(session_id, turn_id)
             if _turn(root, session_id, turn_id)["status"] != "running":
                 raise AgentError("turn_not_running", "当前 Turn 已停止，不能继续执行", exit_code=2)
+            current_turn = _turn(root, session_id, turn_id)
+            frozen_question = json.loads(current_turn["question_json"])
+            if frozen_question.get("_question_skill"):
+                method = question_requirements.load_method(root)
+                if skill_registry.selection_audit(method) != frozen_question["_question_skill"]:
+                    raise AgentError(
+                        "skill_changed_since_selection",
+                        "问题澄清 Skill 已改变；请重新发起问题",
+                        exit_code=2,
+                    )
+                if question_requirements.SKILL_NAME not in skill_context:
+                    skill_context += "\n" + skill_registry.execution_context(method)
+            task = question_requirements.load(root, _session(root, session_id), turn_id)
+            if task:
+                question_requirements.save(root, _session(root, session_id), turn_id, task)
+            if pending_question := question_requirements.question(task):
+                from wonder_stockresearch.interactive import agent_execution
+
+                row = _session(root, session_id)
+                return agent_execution.accept_answer(
+                    root,
+                    row,
+                    agent_execution.AttemptBudget.load(root, row, current_turn, attempt_id),
+                    AgentDecision(type="ask_user", question=pending_question),
+                    current_question,
+                    tool_names,
+                    on_progress,
+                )
             if _runtime_for_turn(_turn(root, session_id, turn_id)) == "pi-v1":
                 from wonder_stockresearch.interactive.pi import pi_agent
 
@@ -416,6 +465,7 @@ def ask(
     tool_names: list[str] | tuple[str, ...] | None = None,
     model_client: agent_model.AgentModelClient | None = None,
     on_progress: progress.ProgressCallback | None = None,
+    on_started: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     ticker = research._checked_ticker(ticker)
     if len(skill_context) > 30000:
@@ -481,6 +531,7 @@ def ask(
             max_iterations=question.max_iterations,
             token_budget=question.token_budget,
             created_at=created_at,
+            root=root,
         )
     _append_event(
         root,
@@ -553,6 +604,7 @@ def ask(
             skill_context=skill_context,
             tool_names=tool_names,
             on_progress=on_progress,
+            on_started=on_started,
         )
 
 
@@ -563,6 +615,7 @@ def followup(
     *,
     model_client: agent_model.AgentModelClient | None = None,
     on_progress: progress.ProgressCallback | None = None,
+    on_started: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     row = _session(root, session_id)
     if row["status"] == "failed":
@@ -625,6 +678,7 @@ def followup(
                 max_iterations=int(row["max_iterations"]),
                 token_budget=int(row["token_budget"]),
                 created_at=created_at,
+                root=root,
             )
         _append_event(
             root, session_id, "followup", {"turn_id": turn_id, "question": request.question}
@@ -648,6 +702,7 @@ def followup(
             skill_context=skill_context,
             tool_names=tool_names,
             on_progress=on_progress,
+            on_started=on_started,
         )
 
 
@@ -820,7 +875,8 @@ def get_status(root: Path, session_id: str) -> dict[str, Any]:
     if row["error_json"]:
         result["error"] = json.loads(row["error_json"])
     with storage.open_db(root) as connection:
-        result["event_count"] = len(storage.list_agent_events(connection, session_id))
+        events = storage.list_agent_events(connection, session_id)
+        result["event_count"] = len(events)
         turns: list[dict[str, Any]] = []
         for item in storage.list_agent_turns(connection, session_id):
             turns.append(
@@ -828,6 +884,14 @@ def get_status(root: Path, session_id: str) -> dict[str, Any]:
                     "turn_id": item["id"],
                     "run_id": item["run_id"],
                     "question": _turn_question_text(item),
+                    "working_record": agent_working_record.project(
+                        agent_working_record.build(
+                            events,
+                            str(item["id"]),
+                            _turn_question_text(item),
+                            status=str(item["status"]),
+                        )
+                    ),
                     "status": item["status"],
                     "iteration": item["iteration"],
                     "used_tokens": item["used_tokens"],
@@ -899,9 +963,15 @@ def _validate_memo_sources(
     request: MemoRequest,
     turn_id: str | None = None,
 ) -> None:
+    _validate_memo_references(root, row, request.source_refs, turn_id)
+
+
+def _validate_memo_references(
+    root: Path, row: dict[str, Any], references: list[EvidenceRef], turn_id: str | None
+) -> None:
     ticker = str(row["ticker"])
     with storage.open_db(root) as connection:
-        for reference in request.source_refs:
+        for reference in references:
             source = storage.get_source(connection, source_id_text(reference.source_id))
             if source is None or source["ticker"] != ticker:
                 raise AgentError(
@@ -991,21 +1061,141 @@ def memo_save(root: Path, session_id: str, request: MemoRequest) -> dict[str, An
             content_hash=hashlib.sha256(memo.content.encode()).hexdigest(),
             created_at=now,
         )
-    return {"saved": True, "memo": json.loads(memo.model_dump_json())}
+        company_memo.attach(connection, memo.model_dump(mode="json"))
+    with storage.project_lock(root):
+        path = company_memo.export(root, str(row["ticker"]))
+    return {"saved": True, "memo": json.loads(memo.model_dump_json()), "path": path}
+
+
+def memo_save_report(root: Path, session_id: str, *, turn_id: str | None = None) -> dict[str, Any]:
+    """用户 save：追加选定的已完成报告；默认当前 Turn，绝不回退到旧成功回答。"""
+    row = _session(root, session_id)
+    with storage.agent_execution_lock(root, session_id), storage.project_lock(root):
+        with storage.open_db(root) as connection:
+            turns = storage.list_agent_turns(connection, session_id)
+            turn = (
+                storage.get_agent_turn(connection, turn_id)
+                if turn_id
+                else (turns[-1] if turns else None)
+            )
+            if turn is None or turn["session_id"] != session_id or turn["ticker"] != row["ticker"]:
+                raise AgentError("unknown_turn", "找不到当前会话的目标问题", exit_code=2)
+            saved_report = storage.get_interactive_report_for_turn(connection, str(turn["id"]))
+            if saved_report is None or turn["status"] not in {"succeeded", "legacy"}:
+                raise AgentError(
+                    "report_unavailable",
+                    "当前问题还没有完成的临时分析，不能保存旧回答代替",
+                    exit_code=2,
+                )
+            try:
+                report = InteractiveReport.model_validate_json(saved_report["report_json"])
+            except ValidationError as error:
+                raise AgentError(
+                    "invalid_report", "临时报告记录损坏，未保存备忘录", exit_code=2
+                ) from error
+            if str(report.session_id) != session_id or report.ticker != row["ticker"]:
+                raise AgentError("invalid_report", "临时报告归属不一致", exit_code=2)
+            refs = list(
+                {
+                    (str(ref.source_id), ref.locator, ref.relation): ref
+                    for ref in [
+                        *report.evidence_refs,
+                        *[ref for claim in report.claims for ref in claim.evidence],
+                    ]
+                }.values()
+            )
+            _validate_memo_references(root, row, refs, str(turn["id"]))
+            existing = connection.execute(
+                "SELECT memo_id FROM company_memo_links WHERE report_turn_id=?", (turn["id"],)
+            ).fetchone()
+            duplicate = existing is not None
+            if not duplicate:
+                memo_id = str(uuid4())
+                now = storage.now_utc()
+                content = report.answer
+                for title, items in (
+                    ("原回答中的结论", [claim.text for claim in report.claims]),
+                    ("反方与限制", report.counterarguments),
+                    ("未完成事项", report.gaps),
+                    ("后续核查", report.suggested_next_checks),
+                ):
+                    if items:
+                        content += f"\n\n### {title}\n\n" + "\n".join(f"- {item}" for item in items)
+                content += f"\n\n分析时间：{storage.to_iso(report.created_at)}"
+                refs_json = json.dumps(
+                    [ref.model_dump(mode="json") for ref in refs], ensure_ascii=False
+                )
+                with storage.transaction(connection):
+                    storage.insert_company_memo(
+                        connection,
+                        memo_id=memo_id,
+                        ticker=report.ticker,
+                        title=report.user_question,
+                        content=content,
+                        source_refs_json=refs_json,
+                        created_from_session=session_id,
+                        created_from_turn=str(turn["id"]),
+                        created_from_report_turn=str(turn["id"]),
+                        tags_json='["saved-analysis"]',
+                        version=1,
+                        created_at=now,
+                    )
+                    company_memo.attach(
+                        connection,
+                        {
+                            "memo_id": memo_id,
+                            "ticker": report.ticker,
+                            "created_at": storage.to_iso(now),
+                        },
+                        report_turn_id=str(turn["id"]),
+                    )
+                    storage.upsert_memory_entry(
+                        connection,
+                        entry_id=f"memo:{memo_id}",
+                        ticker=report.ticker,
+                        memory_type="memo",
+                        status="trusted",
+                        topic=report.user_question,
+                        as_of=None,
+                        content=content,
+                        source_refs_json=refs_json,
+                        origin_ref=f"company_memo:{memo_id}",
+                        content_hash=hashlib.sha256(content.encode()).hexdigest(),
+                        created_at=now,
+                    )
+            notebook = company_memo.list_for_company(connection, report.ticker)[0]
+        # 仍持有写锁；文件不会以较旧视图覆盖其他 save 的结果。
+        path = company_memo.export(root, report.ticker)
+    return {
+        "saved": True,
+        "already_saved": duplicate,
+        "memo": notebook,
+        "turn_id": str(turn["id"]),
+        "path": path,
+    }
 
 
 def memo_list(root: Path, ticker: str) -> dict[str, Any]:
     ticker = research._checked_ticker(ticker)
     storage.initialize(root)
     with storage.open_db(root) as connection:
-        rows = storage.list_company_memos(connection, ticker)
-    return {"ticker": ticker, "memos": [_memo_summary(row, include_content=False) for row in rows]}
+        rows = company_memo.list_for_company(connection, ticker)
+    return {"ticker": ticker, "memos": rows}
 
 
-def memo_read(root: Path, memo_id: str) -> dict[str, Any]:
+def memo_read(root: Path, memo_id: str, *, version: int | None = None) -> dict[str, Any]:
     storage.initialize(root)
     with storage.open_db(root) as connection:
+        notebook = company_memo.read(connection, memo_id, version=version)
+        if notebook is not None:
+            return notebook
         row = storage.get_company_memo(connection, memo_id)
+    if version is not None:
+        raise AgentError(
+            "unknown_memo_version",
+            "历史条目 ID 不支持主备忘录版本，请使用 ticker 或主 ID",
+            exit_code=2,
+        )
     if row is None:
         raise AgentError("unknown_memo", f"找不到 Memo：{memo_id}", exit_code=2)
     return _memo_summary(row, include_content=True)

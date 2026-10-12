@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 LOCK_TIMEOUT_SECONDS = 5.0
 STEP_STATUSES = ("pending", "running", "succeeded", "failed", "blocked", "skipped")
 
@@ -538,6 +538,33 @@ _PI_MESSAGES_DDL = (
     "CREATE INDEX agent_messages_session_turn ON agent_messages(session_id, turn_id, sequence)",
 )
 
+_COMPANY_NOTEBOOK_DDL = (
+    """CREATE TABLE company_notebooks (
+        ticker TEXT PRIMARY KEY REFERENCES stocks(ticker),
+        id TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE company_memo_links (
+        memo_id TEXT PRIMARY KEY REFERENCES company_memos(id),
+        ticker TEXT NOT NULL REFERENCES company_notebooks(ticker),
+        report_turn_id TEXT UNIQUE REFERENCES agent_turns(id),
+        revision INTEGER NOT NULL CHECK(revision > 0),
+        UNIQUE(ticker, revision)
+    )""",
+    """INSERT INTO company_notebooks(ticker,id,title,created_at,updated_at)
+    SELECT ticker,
+        lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+        substr(lower(hex(randomblob(2))),2) || '-a' ||
+        substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),
+        ticker || ' 公司备忘录', MIN(created_at), MAX(updated_at)
+    FROM company_memos GROUP BY ticker""",
+    """INSERT INTO company_memo_links(memo_id,ticker,report_turn_id,revision)
+    SELECT id,ticker,NULL,ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY created_at,id)
+    FROM company_memos""",
+)
+
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS stocks (
@@ -597,6 +624,7 @@ _SCHEMA = (
     *_AGENT_RUNTIME_DDL,
     *_AGENT_RECOVERY_DDL,
     *_PI_MESSAGES_DDL,
+    *_COMPANY_NOTEBOOK_DDL,
 )
 
 # 显式递增迁移：键为目标版本，值为从上一版升级到该版需要执行的语句。
@@ -613,6 +641,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     11: _AGENT_RUNTIME_DDL,
     12: _AGENT_RECOVERY_DDL,
     13: _PI_MESSAGES_DDL,
+    14: _COMPANY_NOTEBOOK_DDL,
 }
 
 

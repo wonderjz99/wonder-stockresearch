@@ -127,7 +127,14 @@ def test_interactive_agent_reads_archived_source_before_final_answer(
         event_types = [
             row["event_type"] for row in storage.list_agent_events(connection, result["session_id"])
         ]
-    assert event_types == ["question", "attempt_started", "decision", "tool_result", "decision"]
+    assert event_types == [
+        "question",
+        "attempt_started",
+        "question_requirements",
+        "decision",
+        "tool_result",
+        "decision",
+    ]
     trace = observability.read_agent_trace(root, str(result["session_id"]))["traces"][0]
     assert [span["name"] for span in trace["spans"]] == [
         "skills.selected",
@@ -175,7 +182,9 @@ def test_memo_save_is_explicit_and_versioned(
     assert saved["saved"] is True
     memo = saved["memo"]
     assert memo["version"] == 1
-    assert agent.memo_list(root, "SYNTHETIC")["memos"][0]["title"] == "长期跟踪事项"
+    notebook = agent.memo_list(root, "SYNTHETIC")["memos"]
+    assert len(notebook) == 1 and notebook[0]["title"] == "SYNTHETIC 公司备忘录"
+    assert notebook[0]["entry_count"] == 1
     assert agent.memo_read(root, memo["memo_id"])["content"] == "下一次复评时补充同行数据。"
 
     saved_again = agent.memo_save(
@@ -188,6 +197,10 @@ def test_memo_save_is_explicit_and_versioned(
         ),
     )
     assert saved_again["memo"]["version"] == 2
+    updated = agent.memo_list(root, "SYNTHETIC")["memos"]
+    assert len(updated) == 1 and updated[0]["memo_id"] == notebook[0]["memo_id"]
+    assert updated[0]["version"] == 2 and updated[0]["entry_count"] == 2
+    assert "下一次复评时补充同行数据。" in agent.memo_read(root, notebook[0]["memo_id"])["content"]
 
 
 def test_agent_rejects_unknown_source_in_temporary_report(

@@ -368,11 +368,15 @@ def build_parser() -> argparse.ArgumentParser:
     agent_trace.add_argument("session_id")
     memo_save = subparsers.add_parser("memo-save", help="把交互结果明确保存为公司 Memo")
     memo_save.add_argument("session_id")
-    memo_save.add_argument("--input", required=True, help="MemoRequest JSON；- 代表 stdin")
+    memo_save.add_argument(
+        "--input", help="可选 MemoRequest JSON；省略则保存当前临时分析，- 代表 stdin"
+    )
+    memo_save.add_argument("--turn-id", help="无 --input 时可指定本 session 的已完成 Turn")
     memo_list = subparsers.add_parser("memo-list", help="列出公司 Memo")
     memo_list.add_argument("ticker")
     memo_read = subparsers.add_parser("memo-read", help="读取公司 Memo")
     memo_read.add_argument("memo_id")
+    memo_read.add_argument("--version", type=int, help="读取公司主备忘录的历史版本")
     memory_search = subparsers.add_parser(
         "memory-search", help="检索某公司的长期记忆和临时 episode 索引"
     )
@@ -478,6 +482,8 @@ def _print_chat_response(root: Path, data: dict[str, object]) -> None:
         result = data["result"]
         if isinstance(result.get("report"), dict):
             print(result["report"].get("answer", ""))
+            if result.get("status") == "completed":
+                print("\n输入 save 加入该公司的备忘录，或继续追问。")
         else:
             if sys.stdout.isatty():
                 _print_finish_summary(root, result)
@@ -503,6 +509,8 @@ def _print_chat_response(root: Path, data: dict[str, object]) -> None:
 def _chat_needs_followup(data: dict[str, object]) -> bool:
     """判断人类终端是否应继续复用当前 chat session。"""
     status = data.get("status")
+    if data.get("can_continue") is True:
+        return True
     if status in {
         "awaiting_symbol_selection",
         "awaiting_confirmation",
@@ -826,14 +834,19 @@ def _run_business(root: Path, args: argparse.Namespace) -> int:
         _emit(True, observability.read_agent_trace(root, args.session_id), [])
         return 0
     if args.command == "memo-save":
-        request = _read_memo_request(args.input)
-        _emit(True, agent.memo_save(root, args.session_id, request), [])
+        if args.input:
+            if args.turn_id:
+                raise CommandError("invalid_arguments", "--input 与 --turn-id 不能同时使用", 2)
+            result = agent.memo_save(root, args.session_id, _read_memo_request(args.input))
+        else:
+            result = agent.memo_save_report(root, args.session_id, turn_id=args.turn_id)
+        _emit(True, result, [])
         return 0
     if args.command == "memo-list":
         _emit(True, agent.memo_list(root, args.ticker), [])
         return 0
     if args.command == "memo-read":
-        _emit(True, agent.memo_read(root, args.memo_id), [])
+        _emit(True, agent.memo_read(root, args.memo_id, version=args.version), [])
         return 0
     if args.command == "memory-search":
         _emit(True, agent.memory_search(root, args.ticker, args.query), [])

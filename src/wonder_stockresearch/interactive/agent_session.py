@@ -70,6 +70,8 @@ def turn_question_text(row: dict[str, Any]) -> str:
 
 
 def initial_context(root: Path, row: dict[str, Any], current_question: str) -> dict[str, Any]:
+    from wonder_stockresearch.interactive import question_requirements
+
     ticker = str(row["ticker"])
     run_id = str(row["run_id"]) if row.get("run_id") else None
     agent_memory.sync_long_memory(root, ticker)
@@ -120,6 +122,10 @@ def initial_context(root: Path, row: dict[str, Any], current_question: str) -> d
         "formal_report_available": bool(run and run["status"] == "completed"),
         "data_scope": session_question(row).context,
     }
+    if row.get("turn_id"):
+        task = question_requirements.load(root, row, str(row["turn_id"]))
+        context["question_requirements"] = task
+        context["analysis_clock"] = task.get("analysis_clock", {})
     with storage.open_db(root) as connection:
         latest_report = storage.get_interactive_report(connection, str(row["id"]))
     if latest_report is not None:

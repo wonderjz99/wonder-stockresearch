@@ -253,15 +253,23 @@ class InteractiveQuestion(StrictModel):
         "capacity_cycle",
         "inventory_cycle",
     ] = "general"
-    context: Literal["latest_completed_report", "latest_run", "sources", "memos", "company_latest"] = (
-        "latest_completed_report"
-    )
+    context: Literal[
+        "latest_completed_report", "latest_run", "sources", "memos", "company_latest"
+    ] = "latest_completed_report"
     run_id: str | None = None
     allow_network: bool = True
     max_iterations: int = Field(default=10, ge=1, le=10)
     token_budget: int = Field(default=60000, ge=256, le=60000)
     input_token_limit: int = Field(default=16000, ge=1024, le=16000)
     output_token_limit: int = Field(default=4096, ge=64, le=8192)
+    as_of: datetime | None = None
+
+    @field_validator("as_of")
+    @classmethod
+    def analysis_date_has_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("as_of 必须带时区")
+        return value
 
 
 class RoutePlan(StrictModel):
@@ -342,6 +350,21 @@ class InteractiveClaim(StrictModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
 
+class NumericBlockRequest(StrictModel):
+    """模型选择已取得的输入和通用运算；数值/单位/趋势由程序生成。"""
+
+    analysis_id: UUID4
+    fact_ids: list[str] = Field(default_factory=list, max_length=400)
+    operations: list[Literal["values", "mean", "range", "population_stddev", "changes"]] = Field(
+        default_factory=lambda: ["values"], min_length=1, max_length=5
+    )
+
+
+class TaskRequirements(StrictModel):
+    periods: list[str] = Field(default_factory=list, max_length=30)
+    unresolved: list[str] = Field(default_factory=list, max_length=8)
+
+
 class InteractiveReport(StrictModel):
     """Agent 的临时研究结果；不会自动进入正式研究报告。"""
 
@@ -354,6 +377,8 @@ class InteractiveReport(StrictModel):
     counterarguments: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
     suggested_next_checks: list[str] = Field(default_factory=list)
+    numeric_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    task_requirements: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
     @field_validator("ticker")
@@ -382,6 +407,8 @@ class AgentDecision(StrictModel):
     gaps: list[str] = Field(default_factory=list)
     suggested_next_checks: list[str] = Field(default_factory=list)
     question: str | None = None
+    task: TaskRequirements | None = None
+    numeric_blocks: list[NumericBlockRequest] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def decision_shape_is_consistent(self) -> AgentDecision:

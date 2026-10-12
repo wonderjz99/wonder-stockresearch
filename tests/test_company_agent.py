@@ -566,7 +566,8 @@ def test_real_skill_overhead_still_leaves_three_rows_for_model_calculation(
             assert result["result"]["average"] == 20.0
             decision = {
                 "type": "final",
-                "answer": "三个期间原始数值平均20，单位未知。",
+                "answer": "计算结果如下，原始单位未确认。",
+                "numeric_blocks": [{"analysis_id": result["analysis_id"], "operations": ["mean"]}],
                 "claims": [],
                 "evidence_refs": result["source_refs"],
                 "counterarguments": [],
@@ -579,7 +580,7 @@ def test_real_skill_overhead_still_leaves_three_rows_for_model_calculation(
     result = agent.ask(
         root,
         "US.MU",
-        InteractiveQuestion(question="自定义原始科目三个财年平均", context="company_latest"),
+        InteractiveQuestion(question="自定义原始科目2024–2026年平均", context="company_latest"),
         skill_context=skill_registry.execution_context(loaded),
         skill_audit=skill_registry.selection_audit(loaded),
         tool_names=skill_registry.execution_tool_ids(loaded, "interactive_research"),

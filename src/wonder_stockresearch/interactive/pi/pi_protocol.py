@@ -241,6 +241,11 @@ class ToolError(ProtocolModel):
     next_step_hint: StrictStr | None = None
     is_error: StrictBool = True
     recoverable: StrictBool = False
+    executed: StrictBool | None = None
+    analysis_id: StrictStr | None = None
+    node: StrictStr | None = None
+    line: Count | None = None
+    column: Count | None = None
 
 
 class ToolResult(ProtocolModel):

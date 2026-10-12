@@ -257,7 +257,9 @@ def test_retry_reuses_successful_tool_and_user_responses(
             session_id,
             turn_id,
             InteractiveFollowup(question="未来三年"),
-            model_client=ScriptedAgentModelClient([(call, 8), ({"type": "final"}, 3)]),
+            model_client=ScriptedAgentModelClient(
+                [(call, 8), ({"type": "final"}, 3), ({"type": "final"}, 0)]
+            ),
         )
 
     def unexpected_tool(*args: object, **kwargs: object) -> None:
@@ -285,7 +287,7 @@ def test_orphan_interrupt_refuses_live_execution_and_preserves_counters(tmp_path
             root,
             "SYNTHETIC",
             InteractiveQuestion(question="遗留执行"),
-            model_client=ScriptedAgentModelClient([({"type": "final"}, 7)]),
+            model_client=ScriptedAgentModelClient([({"type": "final"}, 7), ({"type": "final"}, 0)]),
         )
     session_id, turn_id = only_turn(root)
     _, _, attempt_id = agent._start_attempt(
@@ -313,6 +315,7 @@ def test_v9_migration_preserves_reports_and_budget(tmp_path: Path) -> None:
             - len(storage._AGENT_RUNTIME_DDL)
             - len(storage._AGENT_RECOVERY_DDL)
             - len(storage._PI_MESSAGES_DDL)
+            - len(storage._COMPANY_NOTEBOOK_DDL)
         )
         for statement in storage._SCHEMA[:end]:
             connection.execute(statement)
@@ -372,7 +375,7 @@ def test_attempt_creation_failure_rolls_back_insert(
             root,
             "SYNTHETIC",
             InteractiveQuestion(question="重试创建故障"),
-            model_client=ScriptedAgentModelClient([({"type": "final"}, 7)]),
+            model_client=ScriptedAgentModelClient([({"type": "final"}, 7), ({"type": "final"}, 0)]),
         )
     session_id, turn_id = only_turn(root)
     with monkeypatch.context() as patch:
@@ -440,6 +443,8 @@ def test_v11_migration_failure_rolls_back_metadata(
     storage.initialize(root)
     with storage.open_db(root) as connection:
         connection.execute("DROP TABLE agent_messages")
+        connection.execute("DROP TABLE company_memo_links")
+        connection.execute("DROP TABLE company_notebooks")
         connection.execute("PRAGMA user_version = 11")
     broken = {
         **storage._MIGRATIONS,

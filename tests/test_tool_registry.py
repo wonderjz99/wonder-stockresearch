@@ -39,7 +39,7 @@ def test_agent_prompt_and_executor_share_the_resolved_allowlist(tmp_path: Path) 
     schema_names = {item["name"] for item in agent._tool_catalog([])}
     assert "list_sources" in schema_names
     assert "run_analysis_code" not in schema_names
-    assert "当前工具集合不含可信计算能力" in agent._system_prompt("general", tool_names=[])
+    assert "本轮未提供计算工具" in agent._system_prompt("general", tool_names=[])
 
     selected_names = {item["name"] for item in agent._tool_catalog(["run_trusted_calculation"])}
     assert "run_trusted_calculation" in selected_names

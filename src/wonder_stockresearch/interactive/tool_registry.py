@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from wonder_stockresearch.interactive import agent_tools as handlers
+from wonder_stockresearch.interactive.query_workspace import FUNCTION_GUIDANCE
 from wonder_stockresearch.interactive.tool_contracts import (
     AnalysisArtifactArgs,
     AnalysisCodeArgs,
@@ -114,9 +115,10 @@ _REGISTRY: dict[str, ToolDefinition] = {
     ),
     "query_company_data": ToolDefinition(
         "query_company_data",
-        "查询 company_latest 固定版本的基本信息和财务事实；默认 fields 返回含可用期间的字段目录（不能引用），"
-        "facts 返回数值、期间、口径和定位。用 field_keys 精确选科目、periods 选多期、period_kind=annual 限完整年度。"
-        "按 next_offset 分页；query 扩展有限同义词并按任一词匹配，命中不证明口径相同。覆盖状态区分缺失、失败和部分可用。",
+        "查询 company_latest 固定版本；指标位置未知先 fields/query 并省略 dataset 跨数据集找字段。"
+        "目录不可引用，periods 仅最近五期，period_count/earliest_period/latest_period 给覆盖。"
+        "facts 返回值/期间/单位/定位；field_keys、periods 精确筛选，period_kind=annual 限年度。"
+        "按 next_offset 续页；query 按任一词/有限同义词匹配，不证明口径相同。",
         CompanyQueryArgs,
         frozenset({"interactive_research"}),
         handlers.query_company_data,
@@ -183,7 +185,7 @@ _REGISTRY: dict[str, ToolDefinition] = {
     ),
     "run_analysis_function": ToolDefinition(
         "run_analysis_function",
-        "只对对应 SQL 行执行 def analyze(rows) 受限函数；不能访问文件、网络、环境变量或 SQLite。",
+        "只处理对应 SQL 行，不访问 SQLite。" + FUNCTION_GUIDANCE,
         AnalysisFunctionArgs,
         frozenset({"interactive_research"}),
         handlers.run_analysis_function,
