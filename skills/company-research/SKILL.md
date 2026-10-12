@@ -60,7 +60,7 @@ description: 用 wonder-stockresearch CLI 做单只港股/美股的公司研究�
    ```
    查看 `run_steps` 与 `issues`：`blocked` 表示该通道当前不可用（如无 OpenD、SEC 缺 User-Agent），不是“没有资料”。采集不生成评分、不定稿。
 
-   **调哪个富途接口由 Python 决定，不由你决定**：`collect --kind fundamentals` 固定调用 `futu_fundamentals.py` 里的数据集（公司概况、高管、财报、主营构成、分红回购、股东、板块、估值、分析师评级），并把每个数据集归档成一个 `provider` 来源，metadata 记 `dataset/evidence_class/available_from/currency/accounting_standard`。完整能力与只读边界见 [docs/08-futu-data-capabilities.md](../../docs/08-futu-data-capabilities.md)。你只需决定“要不要 collect”。
+   **调哪个富途接口由 Python 决定，不由你决定**：`collect --kind fundamentals` 固定调用 `futu_fundamentals.py` 里的数据集（公司概况、高管、财报、主营构成、分红回购、股东、板块、估值、分析师评级），并把每个数据集归档成一个 `provider` 来源，metadata 记 `dataset/evidence_class/available_from/currency/accounting_standard`。完整能力与只读边界见 [技术规格的网络与财务口径](../../docs/technical-spec.md#6-网络时间与财务口径)。你只需决定“要不要 collect”。
 
 3. **盘点来源**
    ```bash

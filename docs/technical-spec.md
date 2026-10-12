@@ -1,6 +1,6 @@
 # 技术规格 — 现行契约
 
-本文件描述截至2026-10-12的当前约定，供开发与验收使用；不在正文叠加历史覆盖段落。业务含义由 [研究规格](research-spec.md) 定义，待实现事项在 [PLAN](../PLAN.md)，实际验证在 [PROGRESS](../PROGRESS.md)。变更原因见 [决策索引](decisions.md)，整理前全文见 [历史快照](history/20261012-before-workflow/docs/technical-spec.md)。本次整理不改变业务实现。
+本文件描述当前技术约定，供开发与验收使用。业务含义由 [研究规格](research-spec.md) 定义，安装与使用见 [README](../README.md)，设计参考见 [出处说明](provenance.md)。个人开发计划与历史记录不随仓库分发。
 
 ## 1. 模块与依赖
 
@@ -18,7 +18,7 @@
 
 Python权威管理领域规则、权限、来源/回执、计算、累计预算、状态与事务。legacy默认路径由Python循环调用模型；Pi显式预览由项目自带Node >=22.19进程调用锁定的pi-ai/pi-agent-core 0.83.0，包装源码为TypeScript，运行构建后的runner.mjs。固定Writer和Router保留Python实现。Pi协议为受Pydantic校验的版本化JSONL，先握手再有序请求；致命业务错误终止bridge/Node。Pi turn不等于用户目标AgentTurn。
 
-普通函数、小模块、直接SQL，不增加ORM、仓储接口、DI容器、插件框架、多Agent或LangGraph。编排演进门槛见 [PLAN](../PLAN.md)。导入模块不联网或建表；项目根用 `--root` 指定或当前目录，必须有本项目pyproject标识。
+普通函数、小模块、直接SQL，不增加ORM、仓储接口、DI容器、插件框架、多Agent或LangGraph。编排演进门槛由本地开发计划另行约定。导入模块不联网或建表；项目根用 `--root` 指定或当前目录，必须有本项目pyproject标识。
 
 ## 2. 数据模型与当前默认值
 
@@ -112,7 +112,7 @@ as_of资格、available_from与observed_at的区别只在 [研究规格第6节](
 
 离线测试用虚构/明确标注归档及scripted/fake模型，替换网络/OpenD，导入SDK不建立连接。覆盖结构、引用/时间、预算/授权、持久化/迁移、恢复/幂等、历史冻结、公司隔离、计算与故障回滚。
 
-开发流程与分层检查见 [开发指南](development-workflow.md)。单测证明相应契约，不证明真实LLM稳定理解、选工具或解释经营原因；真实评测另获额度，固定输入/来源/运行时/预算并逐项核验。工程结果、执行状态、研究质量分别记录，不以日志中的completed计正确率。
+开发流程与分层检查见 [README 的开发与验证说明](../README.md#开发与验证)。单测证明相应契约，不证明真实LLM稳定理解、选工具或解释经营原因；真实评测另获额度，固定输入/来源/运行时/预算并逐项核验。工程结果、执行状态、研究质量分别记录，不以日志中的completed计正确率。
 
 ## 8. 固定Writer与审查
 
@@ -130,7 +130,7 @@ Writer只基于已归档证据；ticker/as_of/schema由Python管理，不让模�
 
 纯method不授予权限；capability Skill只组合Python已注册函数。Tool Registry统一Pydantic参数、说明、适用能力、handler和授权，模型schema与执行allowlist一致。Turn固化Skill摘要/hash、registry和工具集合；恢复继续核对。固定Writer不用动态工具循环。直接ask兼容工具集与chat选择的授权不同，不能直接当作同入口A/B。
 
-trace默认保存模型/工具种类、token、长度/hash、时刻、关联ID和受控错误；不保存秘密、隐藏推理或完整请求/工具结果。显式preview/full只将可见I/O送到用户配置的OTLP/Phoenix/Langfuse exporter，SQLite仍保留安全摘要。exporter不可用不影响核心业务，凭据不持久化。详见 [观测说明](16-tracing-and-phoenix.md)。
+trace默认保存模型/工具种类、token、长度/hash、时刻、关联ID和受控错误；不保存秘密、隐藏推理或完整请求/工具结果。显式preview/full只将可见I/O送到用户配置的OTLP/Phoenix/Langfuse exporter，SQLite仍保留安全摘要。exporter不可用不影响核心业务，凭据不持久化。详见 [README 的可选观测配置](../README.md#可选pi-与-langfuse)。
 
 ## 10. 独立交互Agent、数值回答与公司Memo
 

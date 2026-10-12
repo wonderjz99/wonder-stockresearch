@@ -17,14 +17,17 @@ from uuid import uuid4
 
 ENTRY_DOCS = (
     "README.md",
+    "docs/research-spec.md",
+    "docs/technical-spec.md",
+    "docs/provenance.md",
+    "docs/change-template.md",
+)
+LOCAL_ENTRY_DOCS = (
     "AGENTS.md",
     "PLAN.md",
     "PROGRESS.md",
-    "docs/research-spec.md",
-    "docs/technical-spec.md",
     "docs/teaching-contract.md",
     "docs/development-workflow.md",
-    "docs/change-template.md",
     "docs/decisions.md",
 )
 CONSTANTS = {
@@ -100,8 +103,9 @@ def prose_and_fences(content: str) -> tuple[str, bool]:
 
 
 def check_docs(root: Path) -> dict:
-    """检查现行入口/变更单的围栏和内联相对链接，不做语义或锚点证明。"""
+    """公开入口必须存在；本地入口存在时同样严格检查，不做语义或锚点证明。"""
     paths = [root / name for name in ENTRY_DOCS]
+    paths.extend(root / name for name in LOCAL_ENTRY_DOCS if (root / name).exists())
     paths.extend(sorted((root / "docs/changes").glob("*.md")))
     issues, links = [], 0
     for path in paths:
@@ -256,20 +260,28 @@ def main() -> int:
         report = {
             "ok": result.returncode == 0,
             "read_in_order": [
-                "AGENTS.md",
-                "README.md",
-                "PLAN.md",
-                "docs/research-spec.md",
-                "docs/technical-spec.md",
-                "docs/teaching-contract.md",
-                "PROGRESS.md",
+                name
+                for name in (
+                    "AGENTS.md",
+                    "README.md",
+                    "PLAN.md",
+                    "docs/research-spec.md",
+                    "docs/technical-spec.md",
+                    "docs/teaching-contract.md",
+                    "PROGRESS.md",
+                )
+                if (root / name).is_file()
             ],
             "current_defaults": source_contract(root),
             "git_status": result.stdout,
             "changes": sorted(
                 str(p.relative_to(root)) for p in (root / "docs/changes").glob("*.md")
             ),
-            "next": "读PLAN与对应变更单；不自动授权真实调用",
+            "next": (
+                "读PLAN与对应变更单；不自动授权真实调用"
+                if (root / "PLAN.md").is_file()
+                else "读README、研究规格与技术规格；真实调用须用户明确授权"
+            ),
         }
     else:
         if args.pi and not args.full:

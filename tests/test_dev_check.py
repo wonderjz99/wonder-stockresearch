@@ -33,7 +33,35 @@ def test_current_entries_and_code_defaults_agree():
     assert dev.check_contract(ROOT)["ok"]
     assert dev.check_docs(ROOT)["ok"]
     archives = dev.check_archives(ROOT)
-    assert archives["ok"] and archives["files"] == 7
+    assert archives["ok"]
+    # 私有档案不随公开仓库分发；保留本地快照时仍要求完整的七份记录。
+    expected = 7 if (ROOT / "docs/history/20261012-before-workflow").exists() else 0
+    assert archives["files"] == expected
+
+
+def test_public_docs_required_without_personal_development_files(tmp_path):
+    for name in dev.ENTRY_DOCS:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Public documentation\n")
+    assert dev.check_docs(tmp_path)["ok"]
+    (tmp_path / "docs/technical-spec.md").unlink()
+    result = dev.check_docs(tmp_path)
+    assert not result["ok"]
+    assert "missing_document:docs/technical-spec.md" in result["issues"]
+
+
+def test_present_personal_docs_are_checked_including_their_links(tmp_path):
+    for name in dev.ENTRY_DOCS:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Public documentation\n")
+    (tmp_path / "PLAN.md").write_text("[bad reference](missing.md)\n")
+    result = dev.check_docs(tmp_path)
+    assert not result["ok"]
+    assert "missing_link:PLAN.md:missing.md" in result["issues"]
+    (tmp_path / "PLAN.md").write_text("[current rules](docs/technical-spec.md)\n")
+    assert dev.check_docs(tmp_path)["ok"]
 
 
 @pytest.mark.parametrize("replacement", ["59999", "60000 | dup |\n| token_budget | 60000"])
